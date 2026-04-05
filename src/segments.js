@@ -635,11 +635,31 @@ export function buildSegments(eventTimes, options = {}) {
           accelSeg.set(0, 0, 0);
         }
 
+        // Compute platform exit edge (bottom face center of tilted platform) for tube alignment.
+        // Bank angle mirrors platforms.js orientPlatform: atan2(vx, -vy) * 0.92, clamped ±0.72 rad.
+        let platformExitEdge;
+        if (segBeforeRail) {
+          const aVel = velAtSegmentEnd(segBeforeRail);
+          if (aVel && Number.isFinite(aVel.x) && Number.isFinite(aVel.y)) {
+            const bank  = Math.max(-0.72, Math.min(0.72, Math.atan2(aVel.x, -aVel.y) * 0.92));
+            const br    = params.main.ballRadius;
+            const padHY = 0.15; // PAD_HALF_Y — must match platforms.js
+            // Platform center in world: platformPos offset down by br + padHY
+            // Bottom face of tilted platform = rotate local (0, -padHY, 0) by bank around Z
+            platformExitEdge = new THREE.Vector3(
+              platformPos.x + padHY * Math.sin(bank),
+              platformPos.y - br - padHY - padHY * Math.cos(bank),
+              tr.ballZ,
+            );
+          }
+        }
+
         segments.push({
           type:                'SUSTAINED',
           sustainVerticalFall: true,
           sustainArc:          sustainArc ?? undefined,
           sustainPlatformPos:  platformPos.clone(),
+          platformExitEdge,
           tStart:              tEntryEnd,
           tEnd:                tRailEnd,
           startPos:            arcStart.clone(),

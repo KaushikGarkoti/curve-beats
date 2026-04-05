@@ -8,7 +8,7 @@
  *   - Colorful rectangular platform pads with L-bracket wall struts
  *   - Multi-rail track at the bottom for the roll section
  *   - Warm directional light casting platform shadows onto the wall
- *   - Glowing ball with emissive point light
+ *   - Ball with emissive point light (optional GLB mesh)
  */
 
 import * as THREE from 'three';
@@ -23,6 +23,8 @@ import { SustainArcCurve3, isValidSustainArcData } from './sustainArc.js';
 import { applyPadBaseEmissive } from './platforms.js';
 import { params } from './params.js';
 import { applyWallTextureUvRepeat, buildWallPlaneGeometry, fillWallGradientTexture } from './wallTextures.js';
+import { ensurePadGeometryUv2, publicTextureUrl } from './platformTextures.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 // ---------------------------------------------------------------------------
 // Scene / Renderer / Camera
@@ -338,7 +340,81 @@ export function createWallBackground(scene) {
 // Ball
 // ---------------------------------------------------------------------------
 
+/** GLB in `public/modals/` — swap filename if you add another asset. */
+const BALL_GLB_REL_PATH = 'modals/sample_2026-04-05T170210.021.glb';
+
+const _gltfLoader = new GLTFLoader();
+
+/** @type {Promise<import('three').Group | import('three').Object3D> | null} */
+let ballGlbTemplatePromise = null;
+
 /**
+ * Loads the ball GLB once; clones are used per ball instance.
+ * @returns {Promise<import('three').Object3D>}
+ */
+export function loadBallGlbTemplateOnce() {
+  if (!ballGlbTemplatePromise) {
+    const url = publicTextureUrl(BALL_GLB_REL_PATH);
+    ballGlbTemplatePromise = _gltfLoader.loadAsync(url).then(gltf => gltf.scene);
+  }
+  return ballGlbTemplatePromise;
+}
+
+function disposeMeshHierarchy(obj) {
+  obj.traverse(o => {
+    if (o.isMesh) {
+      o.geometry?.dispose();
+      const m = o.material;
+      if (Array.isArray(m)) m.forEach(mat => mat?.dispose?.());
+      else m?.dispose?.();
+    }
+  });
+}
+
+/**
+ * Uniform scale + center so the model fits `params.main.ballRadius` (world units).
+ * @param {import('three').Object3D} object
+ */
+function fitBallModelToRadius(object) {
+  const r = params.main.ballRadius;
+  object.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(object);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const s = (2 * r) / maxDim;
+  object.scale.setScalar(s);
+  object.updateMatrixWorld(true);
+  const box2 = new THREE.Box3().setFromObject(object);
+  const c = new THREE.Vector3();
+  box2.getCenter(c);
+  object.position.sub(c);
+}
+
+/**
+ * @param {import('three').Group} bodyGroup  Holds either placeholder sphere or GLB clone
+ * @param {import('three').Object3D} templateScene  Loaded gltf.scene (cloned inside)
+ */
+function replaceBodyWithGlbClone(bodyGroup, templateScene) {
+  while (bodyGroup.children.length) {
+    const o = bodyGroup.children[0];
+    bodyGroup.remove(o);
+    disposeMeshHierarchy(o);
+  }
+  const model = templateScene.clone(true);
+  fitBallModelToRadius(model);
+  model.traverse(o => {
+    if (o.isMesh) o.castShadow = true;
+  });
+  bodyGroup.add(model);
+}
+
+/**
+ * Ball hierarchy (stable indices for main.js):
+ *   children[0] — point light
+ *   children[1] — body `Group` (placeholder sphere → GLB when loaded)
+ *   children[2..4] — roll dots
+ *
  * @param {import('three').Scene} scene
  * @param {number} [tintColor=0xffffff]  Hex color used for the ball body, glow, and point light.
  */
@@ -348,7 +424,15 @@ export function createBall(scene, tintColor = 0xffffff) {
   // Emissive: same hue as tint but shifted toward blue for a glow feel
   const emissive = tint.clone().multiplyScalar(0.55).lerp(new THREE.Color(0x99bbff), 0.45);
 
-  const geo = new THREE.SphereGeometry(0.32, 32, 32);
+  const root = new THREE.Group();
+  root.name = 'ball';
+
+  const light = new THREE.PointLight(tint, 1.8, 5.5);
+  root.add(light);
+
+  const bodyGroup = new THREE.Group();
+  bodyGroup.name = 'ballBody';
+  const geo = new THREE.SphereGeometry(params.main.ballRadius, 32, 32);
   const mat = new THREE.MeshStandardMaterial({
     color:             tint,
     emissive:          emissive,
@@ -356,41 +440,74 @@ export function createBall(scene, tintColor = 0xffffff) {
     roughness:         0.15,
     metalness:         0.05,
   });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  scene.add(mesh);
+  const sphere = new THREE.Mesh(geo, mat);
+  sphere.castShadow = true;
+  bodyGroup.add(sphere);
+  root.add(bodyGroup);
 
-  // ── child[0]: glow ring — billboarded in main.js each frame ────────────
-  const ringGeo = new THREE.RingGeometry(0.37, 0.58, 36);
-  const ringMat = new THREE.MeshBasicMaterial({
-    color: tint,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.22,
-    depthWrite: false,
-  });
-  const ring = new THREE.Mesh(ringGeo, ringMat);
-  mesh.add(ring); // child[0]
-
-  // ── child[1]: point light ────────────────────────────────────────────────
-  const light = new THREE.PointLight(tint, 1.8, 5.5);
-  mesh.add(light); // child[1]
-
-  // ── children[2..4]: roll-indicator dots ─────────────────────────────────
   const dotColor = tint.clone().multiplyScalar(0.35);
   const dotMat = new THREE.MeshBasicMaterial({ color: dotColor });
   const DOT_OFFSETS = [
-    [ 0.26,  0.00,  0.14],   // right
-    [-0.13,  0.22,  0.14],   // upper-left
-    [-0.13, -0.22,  0.14],   // lower-left
+    [ 0.26,  0.00,  0.14],
+    [-0.13,  0.22,  0.14],
+    [-0.13, -0.22,  0.14],
   ];
   for (const [dx, dy, dz] of DOT_OFFSETS) {
     const dot = new THREE.Mesh(new THREE.SphereGeometry(0.042, 7, 7), dotMat);
     dot.position.set(dx, dy, dz);
-    mesh.add(dot); // children[2], [3], [4]
+    root.add(dot);
   }
 
-  return mesh;
+  scene.add(root);
+
+  void loadBallGlbTemplateOnce()
+    .then(templateScene => {
+      replaceBodyWithGlbClone(bodyGroup, templateScene);
+      setBallPitchTint(root, tintColor);
+    })
+    .catch(err => {
+      console.warn('Ball GLB not used (keeping sphere):', err?.message ?? err);
+    });
+
+  return root;
+}
+
+function applyTintToBallBodyMeshes(bodyGroup, tint, emissive) {
+  bodyGroup.traverse(child => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    for (const m of mats) {
+      if (!m) continue;
+      if ('color' in m && m.color) m.color.copy(tint);
+      if ('emissive' in m && m.emissive) {
+        m.emissive.copy(emissive);
+        if ('emissiveIntensity' in m) m.emissiveIntensity = 0.7;
+      }
+    }
+  });
+}
+
+/**
+ * Updates ball body meshes, point light, and roll dots to match a note color.
+ * @param {import('three').Group} root  Return value of createBall
+ * @param {number} hexColor  THREE hex (same as pitchToPlatformColor)
+ */
+export function setBallPitchTint(root, hexColor) {
+  const tint = new THREE.Color(hexColor);
+  const emissive = tint.clone().multiplyScalar(0.55).lerp(new THREE.Color(0x99bbff), 0.45);
+
+  const bodyGroup = root.children[1];
+  if (bodyGroup && bodyGroup.isGroup) {
+    applyTintToBallBodyMeshes(bodyGroup, tint, emissive);
+  }
+
+  const pl = root.children[0];
+  if (pl && 'color' in pl) pl.color.copy(tint);
+  const dotCol = tint.clone().multiplyScalar(0.35);
+  for (let i = 2; i <= 4; i++) {
+    const dot = root.children[i];
+    if (dot?.material?.color) dot.material.color.copy(dotCol);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -420,27 +537,37 @@ const STRUT_MAT = new THREE.MeshStandardMaterial({
  * @param {number} sx  X side offset (e.g. ±0.72)
  * @returns {THREE.Group}
  */
+/**
+ * BALL_Z ≈ 0.55 (platform group is placed at that Z in world space).
+ * The arm must span from under the pad edge (local Z ≈ 0) all the way back to
+ * world Z = 0 (the wall), i.e. local Z ≈ −0.55.  Previous struts were ~0.45
+ * long and didn't reach — they visually floated in mid-air.
+ */
+const ARM_Z_CENTER  = -0.28;  // local Z mid-point of the horizontal arm
+const ARM_Z_LEN     = 0.62;   // reaches from local Z 0.03 to local Z −0.59
+const WALL_LOCAL_Z  = -0.57;  // approx local Z of the wall face
+
 function makeStrut(sx) {
   const g = new THREE.Group();
 
-  // Horizontal arm: runs from platform underside back to the wall
-  const armGeo = new THREE.BoxGeometry(0.08, 0.07, 0.45);
+  // Horizontal arm: bridges pad underside → wall
+  const armGeo = new THREE.BoxGeometry(0.09, 0.09, ARM_Z_LEN);
   const arm = new THREE.Mesh(armGeo, STRUT_MAT);
-  arm.position.set(sx, -0.095, -0.13);  // behind and under the pad
+  arm.position.set(sx, -0.175, ARM_Z_CENTER);
   arm.castShadow = true;
   g.add(arm);
 
-  // Vertical leg: wall anchor (short bar on the wall surface)
-  const legGeo = new THREE.BoxGeometry(0.07, 0.30, 0.07);
+  // Vertical leg at the wall end (drops down the wall face)
+  const legGeo = new THREE.BoxGeometry(0.08, 0.40, 0.08);
   const leg = new THREE.Mesh(legGeo, STRUT_MAT);
-  leg.position.set(sx, -0.245, -0.34);  // at the wall end of the arm
+  leg.position.set(sx, -0.375, WALL_LOCAL_Z);
   leg.castShadow = true;
   g.add(leg);
 
-  // Small wall-anchor plate (flat rectangle touching the wall)
-  const plateGeo = new THREE.BoxGeometry(0.13, 0.22, 0.04);
+  // Flush anchor plate against the wall surface
+  const plateGeo = new THREE.BoxGeometry(0.15, 0.28, 0.05);
   const plate = new THREE.Mesh(plateGeo, STRUT_MAT);
-  plate.position.set(sx, -0.23, -0.375);
+  plate.position.set(sx, -0.36, WALL_LOCAL_Z - 0.03);
   plate.castShadow = true;
   g.add(plate);
 
@@ -463,8 +590,9 @@ export function createPlatformPool(scene, poolSize = 60) {
     const color = PLATFORM_COLORS[i % PLATFORM_COLORS.length];
     const group = new THREE.Group();
 
-    // Platform pad
-    const padGeo = new THREE.BoxGeometry(1.9, 0.13, 0.38);
+    // Platform pad — subdivided for displacement; uv2 for aoMap
+    const padGeo = new THREE.BoxGeometry(2.0, 0.30, 0.70, 32, 8, 12);
+    ensurePadGeometryUv2(padGeo);
     const padMat = new THREE.MeshStandardMaterial({
       color,
       emissive:       0x000000,
@@ -476,8 +604,12 @@ export function createPlatformPool(scene, poolSize = 60) {
     const pad = new THREE.Mesh(padGeo, padMat);
     pad.castShadow = true;
     pad.receiveShadow = true;
-    /** Pads render on `BLOOM_LAYER` only so bloom applies only to pads, not the whole scene. */
-    pad.layers.set(BLOOM_LAYER);
+    /**
+     * Default layer 0 + `BLOOM_LAYER`: pads must draw in the **base** pass (sharp albedo / textures).
+     * `layers.set(BLOOM_LAYER)` alone removed layer 0, so pads only existed in the bloom RT — UnrealBloom
+     * blurred them and hid surface detail. Bloom pass still uses camera layer 1 only (wall/struts stay off).
+     */
+    pad.layers.enable(BLOOM_LAYER);
     group.add(pad);
 
     // Two struts (left and right)
@@ -582,15 +714,23 @@ function setCylinderMeshAlongChord(mesh, dir) {
 }
 
 /**
- * Sustained notes: optional vertical connector (pad → rail entry) + open tube along arc or chord.
- * @param {Array<{ type: string, startPos: import('three').Vector3, endPos: import('three').Vector3, midi?: number, sustainVerticalFall?: boolean, sustainArc?: object, sustainPlatformPos?: import('three').Vector3 }>} segments
+ * Sustained notes: a single snake-like tube from the platform's exit edge, tangent-matched
+ * to the trajectory, curving along the sustained arc to the note end.
+ *
+ * When `platformExitEdge` + `sustainArc` are both present (normal case after segments.js
+ * computes the bank-corrected exit point), one CatmullRomCurve3 is built:
+ *   [ghost, exitEdge, arcStart, …arc samples…, endRail]
+ * The ghost is placed opposite to the entry direction so Catmull-Rom's tangent at
+ * `exitEdge` aligns with the trajectory at that point.
+ *
+ * Falls back to the legacy drop-connector + chord/arc geometry when data is missing.
  */
 export function createSustainedRailsGroup(segments) {
   const group = new THREE.Group();
   for (const seg of segments) {
     if (seg.type !== 'SUSTAINED') continue;
-    const start = seg.startPos;
-    const end = seg.endPos;
+    const start = seg.startPos;   // = arcStart
+    const end   = seg.endPos;     // = endRail
     if (!start || !end || typeof start.clone !== 'function' || typeof end.clone !== 'function') continue;
 
     const midi = seg.midi ?? 60;
@@ -607,6 +747,63 @@ export function createSustainedRailsGroup(segments) {
       depthWrite:        false,
     };
 
+    const tubeRadius = 0.48;
+    const sa = seg.sustainArc;
+
+    // ── Primary path: smooth snake from platform exit edge through arc ────────
+    const pee = seg.platformExitEdge;
+    const hasExitEdge = pee != null
+      && Number.isFinite(pee.x) && Number.isFinite(pee.y) && Number.isFinite(pee.z);
+
+    if (hasExitEdge && sa && isValidSustainArcData(sa)) {
+      const raw = /** @type {{ center: import('three').Vector3 | { x: number, y: number, z: number }, radius: number, theta0: number, theta1: number, z: number, arcLength?: number }} */ (sa);
+      const center = raw.center instanceof THREE.Vector3
+        ? raw.center
+        : new THREE.Vector3(raw.center.x, raw.center.y, raw.center.z);
+      let arcLength = raw.arcLength;
+      if (arcLength == null || !Number.isFinite(arcLength)) {
+        arcLength = raw.radius * Math.abs(raw.theta1 - raw.theta0);
+      }
+      if (arcLength > 1e-6) {
+        const exitEdge = new THREE.Vector3(pee.x, pee.y, pee.z);
+
+        // Entry section: exitEdge → arcStart.
+        // Ghost placed backward along entry direction so Catmull-Rom tangent at
+        // exitEdge points in the right direction (downward into the tube).
+        const entryVec  = new THREE.Vector3().subVectors(start, exitEdge);
+        const entryLen  = Math.max(entryVec.length(), 0.05);
+        const entryDir  = entryVec.clone().normalize();
+        const ghost     = exitEdge.clone().addScaledVector(entryDir, -entryLen);
+
+        // Arc samples — stop short of endRail so there's a gap before the next platform.
+        // GAP_WORLD is the gap in world units; clamped to 25 % of arc length.
+        const GAP_WORLD = 1.0;
+        const gapFrac   = Math.min(0.25, arcLength > 1e-6 ? GAP_WORLD / arcLength : 0);
+        const tArcEnd   = 0.8 - gapFrac;
+        const arcCurve  = new SustainArcCurve3(center, raw.radius, raw.theta0, raw.theta1, raw.z);
+        const N_ARC     = Math.max(4, Math.min(12, Math.ceil(arcLength * 1.5)));
+        const arcPts    = [];
+        for (let k = 0; k <= N_ARC; k++) {
+          arcPts.push(arcCurve.getPoint((k / N_ARC) * tArcEnd));
+        }
+
+        // Full control-point chain: [ghost, exitEdge, arcStart, ...interior arc, endRail]
+        const ctrlPts = [ghost, exitEdge, ...arcPts];
+        const combined = new THREE.CatmullRomCurve3(ctrlPts, false, 'catmullrom', 0.5);
+
+        const totalLen = entryLen + arcLength * tArcEnd;
+        const tubular  = Math.max(24, Math.min(180, Math.ceil(totalLen * 4)));
+        const geo      = new THREE.TubeGeometry(combined, tubular, tubeRadius, 10, false);
+        const mat      = new THREE.MeshStandardMaterial(matCommon);
+        const mesh     = new THREE.Mesh(geo, mat);
+        mesh.castShadow    = true;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+        continue;
+      }
+    }
+
+    // ── Legacy fallback: drop connector + chord / arc ─────────────────────────
     if (seg.sustainPlatformPos && typeof seg.sustainPlatformPos.clone === 'function') {
       const p0 = seg.sustainPlatformPos;
       const p1 = start.clone();
@@ -620,10 +817,7 @@ export function createSustainedRailsGroup(segments) {
           8,
           false,
         );
-        const dropMat = new THREE.MeshStandardMaterial({
-          ...matCommon,
-          opacity: 0.32,
-        });
+        const dropMat = new THREE.MeshStandardMaterial({ ...matCommon, opacity: 0.32 });
         const dropMesh = new THREE.Mesh(dropGeo, dropMat);
         dropMesh.castShadow = true;
         dropMesh.receiveShadow = true;
@@ -640,10 +834,8 @@ export function createSustainedRailsGroup(segments) {
     const mid = start.clone().add(end).multiplyScalar(0.5);
     if (!vec3Finite(mid)) continue;
 
-    const tubeRadius = 0.48;
     let geo;
     let useArcTube = false;
-    const sa = seg.sustainArc;
     if (sa && isValidSustainArcData(sa)) {
       const raw = /** @type {{ center: import('three').Vector3 | { x: number, y: number, z: number }, radius: number, theta0: number, theta1: number, z: number, arcLength?: number }} */ (sa);
       let arcLength = raw.arcLength;
@@ -654,7 +846,7 @@ export function createSustainedRailsGroup(segments) {
         const center = raw.center instanceof THREE.Vector3
           ? raw.center
           : new THREE.Vector3(raw.center.x, raw.center.y, raw.center.z);
-        const curve = new SustainArcCurve3(center, raw.radius, raw.theta0, raw.theta1, raw.z);
+        const curve   = new SustainArcCurve3(center, raw.radius, raw.theta0, raw.theta1, raw.z);
         const tubular = Math.max(16, Math.min(128, Math.ceil(arcLength * 2.5)));
         geo = new THREE.TubeGeometry(curve, tubular, tubeRadius, 10, false);
         useArcTube = true;
@@ -663,7 +855,7 @@ export function createSustainedRailsGroup(segments) {
     if (!useArcTube) {
       geo = new THREE.CylinderGeometry(tubeRadius, tubeRadius, len, 22, 1, true);
     }
-    const mat = new THREE.MeshStandardMaterial(matCommon);
+    const mat  = new THREE.MeshStandardMaterial(matCommon);
     const mesh = new THREE.Mesh(geo, mat);
     if (!useArcTube) {
       setCylinderMeshAlongChord(mesh, dir);
@@ -671,7 +863,7 @@ export function createSustainedRailsGroup(segments) {
     } else {
       mesh.position.set(0, 0, 0);
     }
-    mesh.castShadow = true;
+    mesh.castShadow    = true;
     mesh.receiveShadow = true;
     group.add(mesh);
   }

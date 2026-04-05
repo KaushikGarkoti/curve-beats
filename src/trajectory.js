@@ -56,7 +56,10 @@ export function getSegmentState(t) {
 }
 
 export function arrivalVelocity(t) {
-  return getTrajectoryPoint(segments, t - 0.004).vel;
+  // Evaluate 1 ms before the event so we get the incoming velocity, not the
+  // post-bounce outgoing velocity, while staying as close to the impact point
+  // as possible (smaller offset = more accurate tangent for platform tilt).
+  return getTrajectoryPoint(segments, t - 0.001).vel;
 }
 
 /** First segment of type ROLL (excludes gap-transition roll halves), for track placement */

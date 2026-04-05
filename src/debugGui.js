@@ -24,9 +24,17 @@ import { refreshWallGradient, applyWallDimensions } from './scene.js';
  *   pathRefOverlay?: { line: import('three').Line },
  *   bakedPathOverlay?: { line: import('three').Line },
  * }} ctx
+ * @returns {{
+ *   gui: import('lil-gui').default,
+ *   setPatternFeatures: (result: import('./midi/midiPatternFeatures.js').MidiPatternFeaturesResult | null) => void,
+ * }}
  */
 export function createDebugGui(ctx) {
-  const gui = new GUI({ title: 'Curve Beats' });
+  const gui = new GUI({ title: 'Curve Beats', width: 340 });
+  gui.domElement.style.setProperty('--font-size', '13px');
+  gui.domElement.style.setProperty('--input-font-size', '13px');
+  gui.domElement.style.setProperty('--widget-height', '24px');
+  gui.domElement.style.setProperty('--title-font-size', '13px');
 
   // ── Baked trajectory from MIDI (reload / regenerate to apply) ─────────────
   const refPath = gui.addFolder('Reference path');
@@ -92,13 +100,16 @@ export function createDebugGui(ctx) {
   } }, 'regenerate').name('↻ Regenerate (needs MIDI loaded)');
 
   const cam = gui.addFolder('Camera');
-  cam.add(params.camera, 'followBallX');
+  cam.add(params.camera, 'followBallX').name('followBallX (tight, legacy)');
   cam.add(params.camera, 'cameraZ', 15, 200, 1);
   cam.add(params.camera, 'offsetX', -40, 40, 0.1);
   cam.add(params.camera, 'offsetY', -5, 15, 0.1);
   cam.add(params.camera, 'lookBiasY', -10, 5, 0.1);
-  cam.add(params.camera, 'lerpY', 0.005, 0.2, 0.001);
+  cam.add(params.camera, 'lerpY', 0.005, 0.2, 0.001).name('lerpY (Y follow)');
   cam.add(params.camera, 'maxCameraYSpeed', 4, 80, 1);
+  cam.add(params.camera, 'xDeadZoneFrac', 0, 1, 0.01).name('xDeadZone (0=always follow, 1=never move)');
+  cam.add(params.camera, 'xEdgeLerp', 0.005, 0.3, 0.005).name('xEdgeLerp (catch-up speed)');
+  cam.add(params.camera, 'xCentreReturn', 0, 0.02, 0.001).name('xCentreReturn (drift to centre)');
 
   const main = gui.addFolder('Main loop');
   main.add(params.main, 'lookahead', 0.5, 40, 0.5);
@@ -205,5 +216,65 @@ export function createDebugGui(ctx) {
     },
   }, 'clearReference').name('Clear reference');
 
-  return gui;
+  const patternHud = {
+    phraseCount: '—',
+    medianIoiBeats: '—',
+    notesPerSec: '—',
+    maxDensity: '—',
+    syncopation: '—',
+    tripletAff: '—',
+    sustainedFrac: '—',
+    burstFrac: '—',
+  };
+  const pat = gui.addFolder('MIDI pattern features');
+  pat.add(patternHud, 'phraseCount').name('phrases').disable();
+  pat.add(patternHud, 'medianIoiBeats').name('median IOI (beats)').disable();
+  pat.add(patternHud, 'notesPerSec').name('notes/s (avg)').disable();
+  pat.add(patternHud, 'maxDensity').name('max density (window)').disable();
+  pat.add(patternHud, 'syncopation').name('mean syncopation').disable();
+  pat.add(patternHud, 'tripletAff').name('mean triplet affinity').disable();
+  pat.add(patternHud, 'sustainedFrac').name('sustained ratio').disable();
+  pat.add(patternHud, 'burstFrac').name('burst windows').disable();
+
+  /** @type {import('./midi/midiPatternFeatures.js').MidiPatternFeaturesResult | null} */
+  let lastPatternResult = null;
+
+  pat.add({
+    logFull() {
+      if (!lastPatternResult) {
+        console.warn('No MIDI pattern result — load a MIDI first.');
+        return;
+      }
+      console.log('MIDI pattern features', lastPatternResult);
+    },
+  }, 'logFull').name('Log full result → console');
+
+  function setPatternFeatures(result) {
+    lastPatternResult = result;
+    if (!result?.summary) {
+      patternHud.phraseCount = '—';
+      patternHud.medianIoiBeats = '—';
+      patternHud.notesPerSec = '—';
+      patternHud.maxDensity = '—';
+      patternHud.syncopation = '—';
+      patternHud.tripletAff = '—';
+      patternHud.sustainedFrac = '—';
+      patternHud.burstFrac = '—';
+    } else {
+      const s = result.summary;
+      patternHud.phraseCount = String(s.phraseCount);
+      patternHud.medianIoiBeats = Number.isFinite(s.medianIoiBeats)
+        ? s.medianIoiBeats.toFixed(3)
+        : '—';
+      patternHud.notesPerSec = s.notesPerSecond.toFixed(2);
+      patternHud.maxDensity = String(s.maxDensityWindow);
+      patternHud.syncopation = s.meanSyncopationWeight.toFixed(3);
+      patternHud.tripletAff = s.meanTripletAffinity.toFixed(3);
+      patternHud.sustainedFrac = s.sustainedNoteFraction.toFixed(2);
+      patternHud.burstFrac = s.burstWindowsFraction.toFixed(2);
+    }
+    pat.controllersRecursive().forEach(c => c.updateDisplay());
+  }
+
+  return { gui, setPatternFeatures };
 }

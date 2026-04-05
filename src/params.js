@@ -79,7 +79,13 @@ export const params = {
     bounceAlternateSideRanges: [],
   },
   camera: {
-    /** If false (default), camera stays at world X=0; lookAt keeps the ball centered with minimal lateral rig motion. */
+    /**
+     * X-axis behaviour:
+     *   false (default) — dead-zone: camera X stays fixed while the ball is within
+     *     `xDeadZoneFrac` of the half-screen width; slides only when the ball would
+     *     go off-screen, then lerps at `xEdgeLerp` speed.
+     *   true            — legacy tight-follow: always lerps toward ball X.
+     */
     followBallX:     false,
     cameraZ:         28,
     /** World-space lateral shift added to camera X (after follow/smooth X). */
@@ -88,6 +94,22 @@ export const params = {
     lookBiasY:       -1.8,
     lerpY:           0.036,
     maxCameraYSpeed: 24,
+    /**
+     * Dead-zone half-width as a fraction of the screen half-width (0–1).
+     * 0 = always follow; 1 = never move in X.
+     * 0.72 means the ball can wander ±72 % of the half-screen before the camera pans.
+     */
+    xDeadZoneFrac:  0.72,
+    /**
+     * Lerp alpha per frame (60 fps baseline) used when pushing the camera to keep
+     * the ball inside the dead zone.  Higher = snappier catch-up.
+     */
+    xEdgeLerp:      0.055,
+    /**
+     * When the ball is inside the dead zone, the camera X drifts back toward centre
+     * at this rate (very slow — prevents permanent off-centre drift).
+     */
+    xCentreReturn:  0.0,
   },
   main: {
     lookahead:            7,

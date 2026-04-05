@@ -276,6 +276,16 @@ export function stopPlayback() {
   Tone.Transport.seconds = 0;
 }
 
+/**
+ * Jump the Transport timeline (paused). Caller should reschedule MIDI and restart
+ * if playback was running.
+ * @param {number} seconds
+ */
+export function seekTransportSeconds(seconds) {
+  Tone.Transport.pause();
+  Tone.Transport.seconds = Math.max(0, seconds);
+}
+
 export function getTransportSeconds() {
   return Tone.Transport.seconds;
 }

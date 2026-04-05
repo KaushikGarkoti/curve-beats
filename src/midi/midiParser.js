@@ -1,7 +1,7 @@
 import { Midi } from '@tonejs/midi';
 
 /**
- * @typedef {{ index: number, name: string, noteCount: number }} MidiTrackSummary
+ * @typedef {{ index: number, name: string, noteCount: number, isPercussion: boolean }} MidiTrackSummary
  */
 
 /**
@@ -73,6 +73,29 @@ function collectNotesFromMidiPitchedTracks(midi) {
 
 /**
  * @param {import('@tonejs/midi').Midi} midi
+ * @param {Set<number>} includedTrackIndices  Absolute track indices (non-percussion only are read)
+ */
+function collectNotesFromMidiPitchedTracksSubset(midi, includedTrackIndices) {
+  const raw = [];
+  for (let trackIdx = 0; trackIdx < midi.tracks.length; trackIdx++) {
+    if (!includedTrackIndices.has(trackIdx)) continue;
+    const track = midi.tracks[trackIdx];
+    if (track.instrument.percussion) continue;
+    for (const n of track.notes) {
+      raw.push({
+        time:       n.time,
+        duration:   n.duration,
+        midi:       n.midi,
+        name:       n.name ?? '',
+        trackIndex: trackIdx,
+      });
+    }
+  }
+  return normalizeNoteEvents(raw);
+}
+
+/**
+ * @param {import('@tonejs/midi').Midi} midi
  */
 function countPitchedTracksMidi(midi) {
   return midi.tracks.filter(t => !t.instrument.percussion).length;
@@ -94,6 +117,30 @@ function isJsonTrackPitched(t) {
 function collectNotesFromJsonPitchedTracks(data) {
   const raw = [];
   for (let trackIdx = 0; trackIdx < data.tracks.length; trackIdx++) {
+    const t = data.tracks[trackIdx];
+    if (!isJsonTrackPitched(t)) continue;
+    const arr = Array.isArray(t.notes) ? t.notes : [];
+    for (const n of arr) {
+      raw.push({
+        time:       /** @type {{ time: number }} */ (n).time,
+        duration:   /** @type {{ duration: number }} */ (n).duration,
+        midi:       /** @type {{ midi: number }} */ (n).midi,
+        name:       String(/** @type {{ name?: string }} */ (n).name ?? ''),
+        trackIndex: trackIdx,
+      });
+    }
+  }
+  return normalizeNoteEvents(raw);
+}
+
+/**
+ * @param {{ tracks: Array<{ notes?: unknown[], isPercussion?: boolean }> }} data
+ * @param {Set<number>} includedTrackIndices
+ */
+function collectNotesFromJsonPitchedTracksSubset(data, includedTrackIndices) {
+  const raw = [];
+  for (let trackIdx = 0; trackIdx < data.tracks.length; trackIdx++) {
+    if (!includedTrackIndices.has(trackIdx)) continue;
     const t = data.tracks[trackIdx];
     if (!isJsonTrackPitched(t)) continue;
     const arr = Array.isArray(t.notes) ? t.notes : [];
@@ -155,16 +202,44 @@ export function getDefaultTrackIndex(midi) {
  */
 export function getTrackSummariesFromMidi(midi) {
   return midi.tracks.map((t, i) => ({
-    index:     i,
-    name:      t.name?.trim() ? t.name : `Track ${i}`,
-    noteCount: t.notes.length,
+    index:          i,
+    name:           t.name?.trim() ? t.name : `Track ${i}`,
+    noteCount:      t.notes.length,
+    isPercussion:   t.instrument.percussion,
   }));
+}
+
+/**
+ * Absolute indices of non-percussion tracks (for default “include all” UI).
+ * @param {import('@tonejs/midi').Midi} midi
+ * @returns {number[]}
+ */
+export function getPitchedTrackIndicesFromMidi(midi) {
+  const out = [];
+  for (let i = 0; i < midi.tracks.length; i++) {
+    if (!midi.tracks[i].instrument.percussion) out.push(i);
+  }
+  return out;
+}
+
+/**
+ * @param {{ tracks: Array<{ isPercussion?: boolean }> }} data
+ * @returns {number[]}
+ */
+export function getPitchedTrackIndicesFromJson(data) {
+  const out = [];
+  for (let i = 0; i < data.tracks.length; i++) {
+    if (isJsonTrackPitched(data.tracks[i])) out.push(i);
+  }
+  return out;
 }
 
 /**
  * Parse ArrayBuffer from a .mid file.
  * @param {ArrayBuffer} buffer
- * @param {number | typeof MERGE_PITCHED_TRACKS} [trackSelection] Single track index, or `MERGE_PITCHED_TRACKS` / omit to merge all pitched (non-drum) tracks.
+ * @param {number | number[] | typeof MERGE_PITCHED_TRACKS} [trackSelection]
+ *   Single track index, non-empty array of absolute track indices (pitched subset merge),
+ *   or `MERGE_PITCHED_TRACKS` / omit to merge all pitched (non-drum) tracks.
  * @returns {{
  *   midi: import('@tonejs/midi').Midi,
  *   notes: MidiNoteEvent[],
@@ -176,6 +251,7 @@ export function getTrackSummariesFromMidi(midi) {
  *   tracks: MidiTrackSummary[],
  *   secondsPerBeat: number,
  *   bpm: number,
+ *   includedTrackIndices: number[],
  * }}
  */
 export function parseMidiBuffer(buffer, trackSelection) {
@@ -183,25 +259,47 @@ export function parseMidiBuffer(buffer, trackSelection) {
   const summaries = getTrackSummariesFromMidi(midi);
   const defaultIdx = getDefaultTrackIndex(midi);
   const nTracks = midi.tracks.length;
-  const sel = resolveMidiTrackSelection(trackSelection, nTracks, defaultIdx);
 
   let normalized;
   let trackName;
   /** @type {number | typeof MERGE_PITCHED_TRACKS} */
   let idx;
   let pitchedTracksMerged = 0;
+  /** @type {number[]} */
+  let includedTrackIndices;
 
-  if (sel === MERGE_PITCHED_TRACKS) {
-    normalized = collectNotesFromMidiPitchedTracks(midi);
-    pitchedTracksMerged = countPitchedTracksMidi(midi);
-    trackName = 'All pitched tracks (merged)';
+  if (Array.isArray(trackSelection)) {
+    const inc = new Set(
+      trackSelection
+        .map(i => Math.floor(Number(i)))
+        .filter(i => Number.isFinite(i) && i >= 0 && i < nTracks),
+    );
+    normalized = collectNotesFromMidiPitchedTracksSubset(midi, inc);
+    includedTrackIndices = [...inc]
+      .filter(i => !midi.tracks[i].instrument.percussion)
+      .sort((a, b) => a - b);
+    trackName = includedTrackIndices.length
+      ? `Tracks ${includedTrackIndices.join(', ')}`
+      : '(no pitched tracks)';
     idx = MERGE_PITCHED_TRACKS;
+    pitchedTracksMerged = includedTrackIndices.length;
   } else {
-    const track = midi.tracks[sel];
-    normalized = normalizeNoteEvents(track.notes, sel);
-    trackName = track.name?.trim() ? track.name : summaries[sel].name;
-    idx = sel;
-    pitchedTracksMerged = track.instrument.percussion ? 0 : 1;
+    const sel = resolveMidiTrackSelection(trackSelection, nTracks, defaultIdx);
+
+    if (sel === MERGE_PITCHED_TRACKS) {
+      normalized = collectNotesFromMidiPitchedTracks(midi);
+      pitchedTracksMerged = countPitchedTracksMidi(midi);
+      trackName = 'All pitched tracks (merged)';
+      idx = MERGE_PITCHED_TRACKS;
+      includedTrackIndices = getPitchedTrackIndicesFromMidi(midi);
+    } else {
+      const track = midi.tracks[sel];
+      normalized = normalizeNoteEvents(track.notes, sel);
+      trackName = track.name?.trim() ? track.name : summaries[sel].name;
+      idx = sel;
+      pitchedTracksMerged = track.instrument.percussion ? 0 : 1;
+      includedTrackIndices = track.instrument.percussion ? [] : [sel];
+    }
   }
 
   const { notes, trimSeconds } = trimLeadingSilence(normalized);
@@ -222,6 +320,7 @@ export function parseMidiBuffer(buffer, trackSelection) {
     tracks: summaries,
     secondsPerBeat,
     bpm,
+    includedTrackIndices,
   };
 }
 
@@ -247,9 +346,10 @@ function getDefaultTrackIndexFromJson(data) {
  */
 function getTrackSummariesFromJson(data) {
   return data.tracks.map((t, i) => ({
-    index:     i,
-    name:      t.name && String(t.name).trim() ? String(t.name) : `Track ${i}`,
-    noteCount: Array.isArray(t.notes) ? t.notes.length : 0,
+    index:          i,
+    name:           t.name && String(t.name).trim() ? String(t.name) : `Track ${i}`,
+    noteCount:      Array.isArray(t.notes) ? t.notes.length : 0,
+    isPercussion:   !isJsonTrackPitched(t),
   }));
 }
 
@@ -258,7 +358,7 @@ function getTrackSummariesFromJson(data) {
  * Tone.js `Midi.fromJSON` — this matches the serialized export used in-repo.
  *
  * @param {{ tracks: Array<{ notes?: unknown[], name?: string, isPercussion?: boolean }>, header?: { bpm?: number, name?: string }, tempo?: Array<{ bpm?: number }>, duration?: number }} data
- * @param {number | typeof MERGE_PITCHED_TRACKS} [trackSelection] Single track index, or merge all pitched tracks.
+ * @param {number | number[] | typeof MERGE_PITCHED_TRACKS} [trackSelection] Single track index, subset array, or merge all pitched tracks.
  * @returns {{
  *   midi: null,
  *   notes: MidiNoteEvent[],
@@ -270,6 +370,7 @@ function getTrackSummariesFromJson(data) {
  *   tracks: MidiTrackSummary[],
  *   secondsPerBeat: number,
  *   bpm: number,
+ *   includedTrackIndices: number[],
  * }}
  */
 export function parseMidiJsonExport(data, trackSelection) {
@@ -280,31 +381,53 @@ export function parseMidiJsonExport(data, trackSelection) {
   const summaries = getTrackSummariesFromJson(data);
   const defaultIdx = getDefaultTrackIndexFromJson(data);
   const nTracks = data.tracks.length;
-  const sel = resolveMidiTrackSelection(trackSelection, nTracks, defaultIdx);
 
   let normalized;
   let trackName;
   /** @type {number | typeof MERGE_PITCHED_TRACKS} */
   let idx;
   let pitchedTracksMerged = 0;
+  /** @type {number[]} */
+  let includedTrackIndices;
 
-  if (sel === MERGE_PITCHED_TRACKS) {
-    normalized = collectNotesFromJsonPitchedTracks(data);
-    pitchedTracksMerged = countPitchedTracksJson(data);
-    trackName = 'All pitched tracks (merged)';
-    idx = MERGE_PITCHED_TRACKS;
-  } else {
-    const raw = /** @type {Array<{ time: number, duration: number, midi: number, name?: string }>} */ (
-      data.tracks[sel]?.notes ?? []
+  if (Array.isArray(trackSelection)) {
+    const inc = new Set(
+      trackSelection
+        .map(i => Math.floor(Number(i)))
+        .filter(i => Number.isFinite(i) && i >= 0 && i < nTracks),
     );
-    normalized = normalizeNoteEvents(raw, sel);
-    trackName =
-      summaries[sel].name ||
-      data.header?.name ||
-      '(unnamed)';
-    idx = sel;
-    const t = data.tracks[sel];
-    pitchedTracksMerged = t && isJsonTrackPitched(t) ? 1 : 0;
+    normalized = collectNotesFromJsonPitchedTracksSubset(data, inc);
+    includedTrackIndices = [...inc]
+      .filter(i => isJsonTrackPitched(data.tracks[i]))
+      .sort((a, b) => a - b);
+    trackName = includedTrackIndices.length
+      ? `Tracks ${includedTrackIndices.join(', ')}`
+      : '(no pitched tracks)';
+    idx = MERGE_PITCHED_TRACKS;
+    pitchedTracksMerged = includedTrackIndices.length;
+  } else {
+    const sel = resolveMidiTrackSelection(trackSelection, nTracks, defaultIdx);
+
+    if (sel === MERGE_PITCHED_TRACKS) {
+      normalized = collectNotesFromJsonPitchedTracks(data);
+      pitchedTracksMerged = countPitchedTracksJson(data);
+      trackName = 'All pitched tracks (merged)';
+      idx = MERGE_PITCHED_TRACKS;
+      includedTrackIndices = getPitchedTrackIndicesFromJson(data);
+    } else {
+      const raw = /** @type {Array<{ time: number, duration: number, midi: number, name?: string }>} */ (
+        data.tracks[sel]?.notes ?? []
+      );
+      normalized = normalizeNoteEvents(raw, sel);
+      trackName =
+        summaries[sel].name ||
+        data.header?.name ||
+        '(unnamed)';
+      idx = sel;
+      const t = data.tracks[sel];
+      pitchedTracksMerged = t && isJsonTrackPitched(t) ? 1 : 0;
+      includedTrackIndices = t && isJsonTrackPitched(t) ? [sel] : [];
+    }
   }
 
   const { notes, trimSeconds } = trimLeadingSilence(normalized);
@@ -334,5 +457,6 @@ export function parseMidiJsonExport(data, trackSelection) {
     tracks: summaries,
     secondsPerBeat,
     bpm,
+    includedTrackIndices,
   };
 }

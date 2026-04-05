@@ -68,34 +68,60 @@
       color: #9a9690;
       margin-right: -4px;
     }
-    #midi-track-select {
-      font-size: 13px;
-      color: #e8e6e3;
-      background-color: #2d2d34;
-      background-image: linear-gradient(180deg, #35353e 0%, #28282f 100%);
-      border: 1px solid rgba(255,255,255,0.22);
-      border-radius: 8px;
-      padding: 6px 28px 6px 10px;
-      max-width: min(360px, 42vw);
+    #track-picker-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      max-width: min(520px, 90vw);
+    }
+    #track-picker {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+      align-items: center;
+    }
+    .track-pick-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      color: #c8c4bc;
       cursor: pointer;
-      color-scheme: dark;
-      appearance: auto;
+      user-select: none;
     }
-    #midi-track-select:hover:not(:disabled) {
-      border-color: rgba(255,255,255,0.32);
-      background-color: #36363f;
+    .track-pick-item input {
+      width: 14px;
+      height: 14px;
+      accent-color: #88aeff;
+      cursor: pointer;
     }
-    #midi-track-select:focus {
-      outline: 2px solid rgba(90, 140, 255, 0.45);
-      outline-offset: 1px;
+    .btn-compact {
+      padding: 4px 10px;
+      font-size: 12px;
+      min-width: 2.25rem;
     }
-    #midi-track-select option {
-      background-color: #2d2d34;
-      color: #e8e6e3;
+    .transport-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
     }
-    #midi-track-select:disabled {
+    #seek-bar {
+      width: min(220px, 28vw);
+      min-width: 80px;
+      accent-color: #7c5cff;
+      cursor: pointer;
+    }
+    #seek-bar:disabled {
       opacity: 0.45;
       cursor: not-allowed;
+    }
+    .seek-time {
+      font-size: 12px;
+      color: #9a9690;
+      font-variant-numeric: tabular-nums;
+      min-width: 9.5rem;
     }
     /* ── Instrument panel ───────────────────────────────────────── */
     #instrument-panel {
@@ -158,8 +184,17 @@
     <input type="file" id="midi-file" accept=".mid,.midi,audio/midi" />
     <input type="file" id="path-ref-file" accept=".json,application/json" />
     <label for="midi-file" class="btn" id="file-label">Upload MIDI</label>
-    <label for="midi-track-select" class="chrome-label">Track</label>
-    <select id="midi-track-select" disabled aria-label="MIDI track"></select>
+    <span class="chrome-label">Include</span>
+    <div id="track-picker-wrap">
+      <div id="track-picker" aria-label="Pitched tracks to include in path and mix"></div>
+      <button type="button" class="btn btn-compact" id="btn-tracks-all" title="Include all pitched tracks" disabled>All</button>
+    </div>
+    <div class="transport-row">
+      <button type="button" class="btn btn-compact" id="btn-seek-back" title="Back 5 seconds" disabled>«</button>
+      <input type="range" id="seek-bar" min="0" max="1" step="0.05" value="0" disabled aria-label="Playback position" />
+      <button type="button" class="btn btn-compact" id="btn-seek-fwd" title="Forward 5 seconds" disabled>»</button>
+      <span id="seek-time" class="seek-time">0:00.0 / 0:00.0</span>
+    </div>
     <button type="button" class="btn btn-primary" id="btn-play" disabled>Play</button>
     <button type="button" class="btn" id="btn-pause" disabled>Pause</button>
     <button type="button" class="btn" id="btn-stop" disabled>Stop</button>

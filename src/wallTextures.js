@@ -13,12 +13,12 @@ const exrLoader = new EXRLoader();
 
 /** @public — adjust paths/names here to match your files */
 export const WALL_TEXTURE_MAPS = {
-  color:        '/textures/wall/wood_table_001_diff_4k.jpg',
-  normal:       '/textures/wall/wood_table_001_nor_gl_4k.exr',
-  roughness:    '/textures/wall/wood_table_001_rough_4k.png',
-  displacement: '/textures/wall/wood_table_001_disp_4k.png',
-  ao:           '/textures/wall/AO.jpg',
-  metalness:    '/textures/wall/Metalness.jpg',
+  color:        '/textures/wall/Poliigon_FoodGlazeStrawberry_10739_BaseColor.jpg',
+  normal:       '/textures/wall/Poliigon_FoodGlazeStrawberry_10739_Normal.png',
+  roughness:    '/textures/wall/Poliigon_FoodGlazeStrawberry_10739_Roughness.jpg',
+  displacement: '/textures/wall/Poliigon_FoodGlazeStrawberry_10739_Displacement.png',
+  ao:           '/textures/wall/Poliigon_FoodGlazeStrawberry_10739_AO.jpg',
+  metalness:    '/textures/wall/Poliigon_FoodGlazeStrawberry_10739_Metallic.jpg',
 };
 
 /**
@@ -214,18 +214,20 @@ export async function loadWallTexturesAsync(wallMesh) {
   oldMat.dispose();
 
   const newMat = new THREE.MeshStandardMaterial({
-    color:             0xffffff,
-    map:               colorMap,
-    normalMap:         normalMap ?? undefined,
-    roughnessMap:      roughnessMap ?? undefined,
-    metalnessMap:      metalnessMap ?? undefined,
-    aoMap:             aoMap ?? undefined,
-    displacementMap:   displacementMap ?? undefined,
-    displacementScale: WALL_DISPLACEMENT_SCALE,
-    displacementBias:  WALL_DISPLACEMENT_BIAS,
-    roughness:         roughnessMap ? 1 : 0.92,
-    metalness:         metalnessMap ? 1 : 0,
+    color:     0xffffff,
+    map:       colorMap,
+    roughness: roughnessMap ? 1 : 0.92,
+    metalness: metalnessMap ? 1 : 0,
   });
+  if (normalMap) newMat.normalMap = normalMap;
+  if (roughnessMap) newMat.roughnessMap = roughnessMap;
+  if (metalnessMap) newMat.metalnessMap = metalnessMap;
+  if (aoMap) newMat.aoMap = aoMap;
+  if (displacementMap) {
+    newMat.displacementMap = displacementMap;
+    newMat.displacementScale = WALL_DISPLACEMENT_SCALE;
+    newMat.displacementBias = WALL_DISPLACEMENT_BIAS;
+  }
 
   wallMesh.material = newMat;
   wallMesh.userData.wallUsesGradient = false;

@@ -23,6 +23,7 @@ import {
   startPlayback,
   pausePlayback,
   stopPlayback,
+  seekTransportSeconds,
   getTransportSeconds,
   getTransportState,
   INSTRUMENT_DEFS,
@@ -32,6 +33,7 @@ import {
   resetTrackInstruments,
 } from './audioSampler.js';
 import { parseMidiBuffer, parseMidiJsonExport, MERGE_PITCHED_TRACKS } from './midi/midiParser.js';
+import { computeMidiPatternFeatures } from './midi/midiPatternFeatures.js';
 import defaultMidiJson from './midis/midi.json';
 import { generateTrajectoryFromNotes } from './midi/trajectoryGenerator.js';
 import { pitchToBurstColor, pitchToPlatformColor } from './midi/pitchColor.js';
@@ -43,8 +45,10 @@ import {
   createTrail, createParticleSystem, triggerBurst, updateParticles,
   createPathOverlayLine, updatePathOverlayGeometry,
   clampBallPositionToWall,
+  setBallPitchTint,
 } from './scene.js';
 import { loadWallTexturesAsync } from './wallTextures.js';
+import { applyPlatformTexturesToPool } from './platformTextures.js';
 import {
   activatePlatform, cullOldPlatforms, resetPlatformPool,
   animatePlatformHit, updatePlatformAnimations,
@@ -52,6 +56,9 @@ import {
 import { updateCamera, updateKeyLight, onResize, resetCameraFollow } from './camera.js';
 import { params } from './params.js';
 import { createDebugGui } from './debugGui.js';
+
+/** @type {((r: import('./midi/midiPatternFeatures.js').MidiPatternFeaturesResult | null) => void) | null} */
+let setPatternFeatures = null;
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -69,8 +76,18 @@ const hudBeat = document.getElementById('hud-beat');
 const hudPlat = document.getElementById('hud-plat');
 const hudPathDiff = document.getElementById('hud-path-diff');
 const pathRefFileInput = document.getElementById('path-ref-file');
-const trackSelect = document.getElementById('midi-track-select');
+const trackPicker = document.getElementById('track-picker');
+const btnTracksAll = document.getElementById('btn-tracks-all');
+const seekBar = /** @type {HTMLInputElement | null} */ (document.getElementById('seek-bar'));
+const seekTimeEl = document.getElementById('seek-time');
+const btnSeekBack = document.getElementById('btn-seek-back');
+const btnSeekFwd = document.getElementById('btn-seek-fwd');
 const instrumentPanel = document.getElementById('instrument-panel');
+
+/** Timeline length (seconds) for scrub bar — from last successful parse. */
+let lastDurationSeconds = 0;
+/** While true, `animate` does not overwrite the seek slider from transport. */
+let seekBarDragging = false;
 
 /** Distinct tint colors assigned to secondary balls in order of creation. */
 const BALL_TINT_COLORS = [
@@ -94,6 +111,100 @@ function setStatus(text, kind = '') {
   statusEl.className = kind;
 }
 
+function formatTimeSec(t) {
+  const s = Math.max(0, t);
+  const m = Math.floor(s / 60);
+  const sec = s - m * 60;
+  return `${m}:${sec < 10 ? '0' : ''}${sec.toFixed(1)}`;
+}
+
+/** @returns {number[]} */
+function getCheckedIncludedTrackIndices() {
+  if (!trackPicker) return [];
+  const boxes = trackPicker.querySelectorAll('input[type="checkbox"][data-track-index]');
+  return [...boxes]
+    .filter(b => b.checked)
+    .map(b => parseInt(b.getAttribute('data-track-index') ?? '0', 10));
+}
+
+function resetVisualStateForSeek() {
+  firedEvents = createEventTracker();
+  activatedPlatforms.clear();
+  resetPlatformPool(platformPool);
+  rollAngle = 0;
+  primaryTrailState.history.length = 0;
+  primaryTrailState.lastT = -999;
+  primarySquash.active = false;
+  for (const sb of secondaryBalls) {
+    sb.firedEvents = createEventTracker();
+    sb.activatedPlatforms.clear();
+    resetPlatformPool(sb.platformPool);
+    sb.rollAngle = 0;
+    sb.squash.active = false;
+    sb.trailState.lastT = -999;
+    sb.trailState.history.length = 0;
+    sb.trail.line.geometry.setDrawRange(0, 0);
+  }
+}
+
+/**
+ * @param {number} seconds
+ */
+async function seekToTime(seconds) {
+  if (!hasTrajectory() || !lastMidiNotes?.length) return;
+  const maxT = Math.max(0.01, lastDurationSeconds);
+  const t = Math.max(0, Math.min(maxT, seconds));
+  const wasPlaying = getTransportState() === 'started';
+  pausePlayback();
+  seekTransportSeconds(t);
+  scheduleMidiNotes(lastMidiNotes);
+  resetVisualStateForSeek();
+  if (wasPlaying) {
+    try {
+      await startPlayback();
+    } catch (e) {
+      console.error(e);
+      setStatus(`Audio: ${e instanceof Error ? e.message : String(e)}`, 'err');
+    }
+  }
+}
+
+let trackPickerDebounce = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+
+async function applyTrackIncludeSelection() {
+  const checked = getCheckedIncludedTrackIndices();
+  if (!checked.length) {
+    setStatus('Select at least one pitched track.', 'err');
+    return;
+  }
+  setStatus('Updating tracks…', '');
+  btnPlay.disabled = true;
+  btnPause.disabled = true;
+  btnStop.disabled = true;
+  try {
+    let parsed;
+    if (lastMidiBuffer) {
+      parsed = parseMidiBuffer(lastMidiBuffer, checked);
+    } else if (lastJsonData) {
+      parsed = parseMidiJsonExport(lastJsonData, checked);
+    } else {
+      return;
+    }
+    await applyParsedMidi(parsed);
+  } catch (e) {
+    console.error(e);
+    setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`, 'err');
+  }
+}
+
+function scheduleTrackPickerApply() {
+  if (trackPickerDebounce) clearTimeout(trackPickerDebounce);
+  trackPickerDebounce = setTimeout(() => {
+    trackPickerDebounce = null;
+    void applyTrackIncludeSelection();
+  }, 280);
+}
+
 // ---------------------------------------------------------------------------
 // Three.js bootstrap
 // ---------------------------------------------------------------------------
@@ -111,6 +222,9 @@ loadWallTexturesAsync(wall).catch(err => console.warn('Wall PBR textures:', err)
 
 const ball = createBall(scene);
 const platformPool = createPlatformPool(scene, 80);
+void applyPlatformTexturesToPool(platformPool).catch(err =>
+  console.warn('Platform PBR textures:', err),
+);
 const particles = createParticleSystem(scene);
 const trail = createTrail(scene);
 
@@ -306,6 +420,9 @@ function addSecondaryBall(trackIndex) {
     squash: { active: false, startTime: 0 },
     firedEvents: createEventTracker(),
   });
+  void applyPlatformTexturesToPool(sbPool).catch(err =>
+    console.warn('Platform PBR textures (secondary):', err),
+  );
 }
 
 /** @param {SecondaryBall} entry */
@@ -349,44 +466,82 @@ function regenerateTrajectoryFromMidi() {
   syncPathOverlays();
 }
 
+({ setPatternFeatures } = createDebugGui({
+  scene,
+  camera,
+  bloomPass,
+  wall,
+  ambient,
+  fill,
+  keyLight,
+  trailLine: trail.line,
+  particles,
+  onRegenerateTrajectory: regenerateTrajectoryFromMidi,
+  syncPathOverlays,
+  exportTrajectoryPathJson,
+  clearReferencePath,
+  onPickReferencePath: () => pathRefFileInput?.click(),
+  pathRefOverlay,
+  bakedPathOverlay,
+}));
+
 /**
- * @param {{ notes: { time: number, duration: number, midi: number, name: string }[], duration: number, trackName: string, secondsPerBeat: number, tracks: import('./midi/midiParser.js').MidiTrackSummary[], trackIndex: number | typeof MERGE_PITCHED_TRACKS, pitchedTracksMerged?: number }} parsed
+ * Pitched tracks only — checked rows are merged into one trajectory + mix.
+ * @param {{ tracks: import('./midi/midiParser.js').MidiTrackSummary[], trackIndex: number | typeof MERGE_PITCHED_TRACKS, includedTrackIndices?: number[] }} parsed
  */
-function populateTrackSelect(parsed) {
-  if (!trackSelect) return;
-  const { tracks, trackIndex } = parsed;
-  trackSelect.innerHTML = '';
-  const mergeOpt = document.createElement('option');
-  mergeOpt.value = MERGE_PITCHED_TRACKS;
-  mergeOpt.textContent = 'All pitched tracks (merged)';
-  trackSelect.appendChild(mergeOpt);
-  for (const t of tracks) {
-    const opt = document.createElement('option');
-    opt.value = String(t.index);
-    opt.textContent = `${t.index}: ${t.name} (${t.noteCount} notes)`;
-    trackSelect.appendChild(opt);
+function populateTrackPicker(parsed) {
+  if (!trackPicker) return;
+  const { tracks, includedTrackIndices } = parsed;
+  const inc = new Set(includedTrackIndices ?? []);
+  trackPicker.innerHTML = '';
+  const pitched = tracks.filter(t => !t.isPercussion);
+  if (!pitched.length) {
+    trackPicker.appendChild(document.createTextNode('(no pitched tracks)'));
+    if (btnTracksAll) btnTracksAll.disabled = true;
+    return;
   }
-  trackSelect.value = trackIndex === MERGE_PITCHED_TRACKS ? MERGE_PITCHED_TRACKS : String(trackIndex);
-  trackSelect.disabled = tracks.length <= 1;
+  if (btnTracksAll) btnTracksAll.disabled = false;
+
+  for (const t of pitched) {
+    const label = document.createElement('label');
+    label.className = 'track-pick-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.trackIndex = String(t.index);
+    cb.checked = inc.size === 0 ? true : inc.has(t.index);
+    cb.addEventListener('change', () => {
+      const selected = getCheckedIncludedTrackIndices();
+      if (!selected.length) {
+        cb.checked = true;
+        setStatus('Select at least one pitched track.', 'err');
+        return;
+      }
+      scheduleTrackPickerApply();
+    });
+    const span = document.createElement('span');
+    span.textContent = `${t.index}: ${t.name}`;
+    span.title = `${t.noteCount} notes`;
+    label.appendChild(cb);
+    label.appendChild(span);
+    trackPicker.appendChild(label);
+  }
 }
 
 /**
  * Build per-track instrument dropdowns.
  * Shows one row per track that has notes (all tracks in merged mode, just the
  * selected track in single-track mode).
- * @param {{ tracks: import('./midi/midiParser.js').MidiTrackSummary[], trackIndex: number | typeof MERGE_PITCHED_TRACKS }} parsed
- */
-/**
- * @param {{ tracks: import('./midi/midiParser.js').MidiTrackSummary[], trackIndex: number | typeof MERGE_PITCHED_TRACKS }} parsed
+ * @param {{ tracks: import('./midi/midiParser.js').MidiTrackSummary[], trackIndex: number | typeof MERGE_PITCHED_TRACKS, includedTrackIndices?: number[] }} parsed
  */
 function populateInstrumentPanel(parsed) {
   if (!instrumentPanel) return;
   instrumentPanel.innerHTML = '';
 
-  const { tracks, trackIndex } = parsed;
+  const { tracks, trackIndex, includedTrackIndices } = parsed;
   const isMerged = trackIndex === MERGE_PITCHED_TRACKS;
+  const includedSet = new Set(includedTrackIndices ?? []);
   const tracksToShow = isMerged
-    ? tracks.filter(t => t.noteCount > 0)
+    ? tracks.filter(t => t.noteCount > 0 && !t.isPercussion && includedSet.has(t.index))
     : tracks.filter(t => t.index === trackIndex);
 
   if (!tracksToShow.length) {
@@ -448,11 +603,21 @@ function populateInstrumentPanel(parsed) {
  * @param {{ notes: { time: number, duration: number, midi: number, name: string }[], duration: number, trackName: string, secondsPerBeat: number, tracks: { index: number, name: string, noteCount: number }[], trackIndex: number | typeof MERGE_PITCHED_TRACKS, pitchedTracksMerged?: number }} parsed
  */
 async function applyParsedMidi(parsed) {
-  populateTrackSelect(parsed);
+  populateTrackPicker(parsed);
   populateInstrumentPanel(parsed);
 
   const { notes, duration, trackName, secondsPerBeat, trackIndex, pitchedTracksMerged } = parsed;
   lastSecondsPerBeat = secondsPerBeat;
+  lastDurationSeconds = duration;
+  if (seekBar) {
+    seekBar.max = String(Math.max(0.01, duration));
+    seekBar.disabled = !notes.length;
+  }
+  if (btnSeekBack) btnSeekBack.disabled = !notes.length;
+  if (btnSeekFwd) btnSeekFwd.disabled = !notes.length;
+  if (seekTimeEl) {
+    seekTimeEl.textContent = `${formatTimeSec(0)} / ${formatTimeSec(duration)}`;
+  }
 
   // Build per-track note lookup for secondary ball trajectory generation
   lastParsedNotesByTrack = new Map();
@@ -467,7 +632,7 @@ async function applyParsedMidi(parsed) {
 
   if (!notes.length) {
     setStatus(
-      'No notes — try merging pitched tracks, or choose a single track (e.g. drums).',
+      'No notes — include at least one pitched track (drum tracks are ignored).',
       'err',
     );
     await ensureSamplerLoaded();
@@ -490,6 +655,7 @@ async function applyParsedMidi(parsed) {
     btnPlay.disabled = true;
     btnPause.disabled = true;
     btnStop.disabled = true;
+    setPatternFeatures?.(null);
     return;
   }
 
@@ -497,6 +663,7 @@ async function applyParsedMidi(parsed) {
   await ensureSamplerLoaded();
 
   lastMidiNotes = notes;
+  setPatternFeatures?.(computeMidiPatternFeatures(notes, { secondsPerBeat }));
   const bundle = generateTrajectoryFromNotes(notes, { secondsPerBeat });
   setTrajectoryBundle(bundle);
   stopPlayback();
@@ -583,28 +750,33 @@ fileInput.addEventListener('change', async () => {
   fileInput.value = '';
 });
 
-trackSelect?.addEventListener('change', async () => {
-  const v = trackSelect.value;
-  const selection = v === MERGE_PITCHED_TRACKS ? MERGE_PITCHED_TRACKS : Number(v);
-  if (v !== MERGE_PITCHED_TRACKS && Number.isNaN(/** @type {number} */ (selection))) return;
-  setStatus('Switching track…', '');
-  btnPlay.disabled = true;
-  btnPause.disabled = true;
-  btnStop.disabled = true;
-  try {
-    let parsed;
-    if (lastMidiBuffer) {
-      parsed = parseMidiBuffer(lastMidiBuffer, selection);
-    } else if (lastJsonData) {
-      parsed = parseMidiJsonExport(lastJsonData, selection);
-    } else {
-      return;
-    }
-    await applyParsedMidi(parsed);
-  } catch (e) {
-    console.error(e);
-    setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`, 'err');
+btnTracksAll?.addEventListener('click', () => {
+  if (!trackPicker) return;
+  const boxes = trackPicker.querySelectorAll('input[type="checkbox"][data-track-index]');
+  for (const b of boxes) {
+    b.checked = true;
   }
+  scheduleTrackPickerApply();
+});
+
+seekBar?.addEventListener('pointerdown', () => {
+  seekBarDragging = true;
+});
+seekBar?.addEventListener('input', () => {
+  seekBarDragging = true;
+});
+seekBar?.addEventListener('change', () => {
+  if (!seekBar) return;
+  seekBarDragging = false;
+  void seekToTime(parseFloat(seekBar.value));
+});
+
+const SEEK_SKIP_SEC = 5;
+btnSeekBack?.addEventListener('click', () => {
+  void seekToTime(getTransportSeconds() - SEEK_SKIP_SEC);
+});
+btnSeekFwd?.addEventListener('click', () => {
+  void seekToTime(getTransportSeconds() + SEEK_SKIP_SEC);
 });
 
 pathRefFileInput?.addEventListener('change', async () => {
@@ -735,7 +907,6 @@ function animate() {
     rollAngle += (vxy / params.main.ballRadius) * dt;
   }
   ball.rotation.z = -rollAngle;
-  ball.children[0].quaternion.copy(camera.quaternion);
 
   updateBallSquash(ball, primarySquash, currentT);
   updateTrail(trail, primaryTrailState, visPos, currentT);
@@ -749,7 +920,6 @@ function animate() {
       sb.rollAngle += (vxy / params.main.ballRadius) * dt;
     }
     sb.ball.rotation.z = -sb.rollAngle;
-    sb.ball.children[0].quaternion.copy(camera.quaternion);
     updateBallSquash(sb.ball, sb.squash, currentT);
     updateTrail(sb.trail, sb.trailState, sbState.pos, currentT);
 
@@ -811,9 +981,28 @@ function animate() {
       triggerBurst(particles, impactPos, color, currentT);
       animatePlatformHit(platformPool, hit.index, currentT, lastSecondsPerBeat);
       triggerSquash(primarySquash, currentT);
+      const padHex = pitchToPlatformColor(pitch);
+      setBallPitchTint(ball, padHex);
+      trail.tint.setHex(padHex);
     }
 
     hudBeat.textContent = `${railOnly ? '♪' : isBounce ? '⬇' : '→'} #${hit.index + 1}`;
+  }
+
+  for (const sb of secondaryBalls) {
+    const b = sb.bundle;
+    const sbHits = pollEvents(b.eventTimes, sb.firedEvents, currentT, params.main.pollWindow);
+    for (const hit of sbHits) {
+      const pitch = b.landingPitches[hit.index] ?? 60;
+      const isBounce = b.landingTypes[hit.index] === 'BOUNCE';
+      const railOnly = b.eventUsesSustainedRail[hit.index];
+      const hasBouncePad = isBounce && !railOnly;
+      if (hasBouncePad) {
+        const padHex = pitchToPlatformColor(pitch);
+        setBallPitchTint(sb.ball, padHex);
+        sb.trail.tint.setHex(padHex);
+      }
+    }
   }
 
   updateCamera(camera, visPos, dt);
@@ -822,31 +1011,19 @@ function animate() {
   hudT.textContent = currentT.toFixed(3);
   hudPlat.textContent = `${platformPool.filter(g => g.visible).length} [${state.type}] ${getTransportState()}`;
 
+  if (seekBar && !seekBarDragging) {
+    seekBar.value = String(Math.min(lastDurationSeconds, Math.max(0, currentT)));
+  }
+  if (seekTimeEl) {
+    seekTimeEl.textContent = `${formatTimeSec(currentT)} / ${formatTimeSec(lastDurationSeconds)}`;
+  }
+
   renderSelectiveBloom(renderer, scene, camera, bloomPipeline);
 }
 
 window.addEventListener('resize', () => {
   onResize(camera, renderer);
   resizeSelectiveBloomPipeline(bloomPipeline, window.innerWidth, window.innerHeight);
-});
-
-createDebugGui({
-  scene,
-  camera,
-  bloomPass,
-  wall,
-  ambient,
-  fill,
-  keyLight,
-  trailLine: trail.line,
-  particles,
-  onRegenerateTrajectory: regenerateTrajectoryFromMidi,
-  syncPathOverlays,
-  exportTrajectoryPathJson,
-  clearReferencePath,
-  onPickReferencePath: () => pathRefFileInput?.click(),
-  pathRefOverlay,
-  bakedPathOverlay,
 });
 
 animate();
