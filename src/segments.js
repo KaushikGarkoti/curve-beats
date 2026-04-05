@@ -56,9 +56,7 @@ export function spatialGap(gapSeconds) {
  */
 export function spatialGapForRoll(gapSeconds) {
   if (gapSeconds <= 0) return 0;
-  if (params.trajectory.rollSpatialGapUncapped) {
-    return gapSeconds;
-  }
+  if (params.trajectory.rollSpatialGapUncapped) return gapSeconds;
   return Math.min(gapSeconds, params.trajectory.maxSpatialGap);
 }
 
@@ -159,7 +157,7 @@ function rollSpiralDerivativeDu(start, end, u, turns, radius, downDepth) {
 export function bounceVerticalDrop(gap) {
   const tr = params.trajectory;
   const g = spatialGap(gap);
-  return Math.min(tr.yDropMax, tr.targetSpeed * g * tr.dropScale);
+  return Math.max(tr.minSpatialY, Math.min(tr.yDropMax, tr.targetSpeed * g * tr.dropScale));
 }
 
 /**
@@ -249,7 +247,7 @@ export function computeLandings(eventTimes, bounceThreshold) {
       );
     } else {
       sideSign = nextLateralSign(sideSign, tEnd);
-      const dx = sideSign * params.trajectory.targetSpeed * sgBounce;
+      const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce);
       const dy = -bounceVerticalDrop(gap);
       endPos = new THREE.Vector3(cursor.x + dx, cursor.y + dy, params.trajectory.ballZ);
     }
@@ -395,7 +393,8 @@ export function buildSegments(eventTimes, options = {}) {
   landingPositions.push(...lands.map(p => p.clone()));
   landingTypes.push(...ltypes);
 
-  /** Sustained notes now use a pad at onset + rail below; keep false so platforms render. */
+  // true for notes that own a SUSTAINED tube — those events skip platform creation because
+  // the ball descends through the pad body during SUSTAIN_ENTRY (the pad is below the ball).
   const eventUsesSustainedRail = eventTimes.map(() => false);
 
   if (!notes || notes.length !== eventTimes.length) {
@@ -442,7 +441,7 @@ export function buildSegments(eventTimes, options = {}) {
         }
       } else {
         sideSign = nextLateralSign(sideSign, tEnd);
-        const dx = sideSign * params.trajectory.targetSpeed * sgBounce;
+        const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce);
         const dy = -bounceVerticalDrop(gap);
         endPos = new THREE.Vector3(cursor.x + dx, cursor.y + dy, params.trajectory.ballZ);
         segments.push(makeKinematicSegment(cursor, endPos, tStart, tEnd, false, i));
@@ -526,7 +525,7 @@ export function buildSegments(eventTimes, options = {}) {
           sideSign = endPos.x >= 0 ? 1 : -1;
         } else {
           sideSign = nextLateralSign(sideSign, t_i);
-          const dx = sideSign * params.trajectory.targetSpeed * sgBounce;
+          const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce);
           const dy = -bounceVerticalDrop(gap);
           endPos = new THREE.Vector3(cursor.x + dx, cursor.y + dy, params.trajectory.ballZ);
 
@@ -635,31 +634,11 @@ export function buildSegments(eventTimes, options = {}) {
           accelSeg.set(0, 0, 0);
         }
 
-        // Compute platform exit edge (bottom face center of tilted platform) for tube alignment.
-        // Bank angle mirrors platforms.js orientPlatform: atan2(vx, -vy) * 0.92, clamped ±0.72 rad.
-        let platformExitEdge;
-        if (segBeforeRail) {
-          const aVel = velAtSegmentEnd(segBeforeRail);
-          if (aVel && Number.isFinite(aVel.x) && Number.isFinite(aVel.y)) {
-            const bank  = Math.max(-0.72, Math.min(0.72, Math.atan2(aVel.x, -aVel.y) * 0.92));
-            const br    = params.main.ballRadius;
-            const padHY = 0.15; // PAD_HALF_Y — must match platforms.js
-            // Platform center in world: platformPos offset down by br + padHY
-            // Bottom face of tilted platform = rotate local (0, -padHY, 0) by bank around Z
-            platformExitEdge = new THREE.Vector3(
-              platformPos.x + padHY * Math.sin(bank),
-              platformPos.y - br - padHY - padHY * Math.cos(bank),
-              tr.ballZ,
-            );
-          }
-        }
-
         segments.push({
           type:                'SUSTAINED',
           sustainVerticalFall: true,
           sustainArc:          sustainArc ?? undefined,
           sustainPlatformPos:  platformPos.clone(),
-          platformExitEdge,
           tStart:              tEntryEnd,
           tEnd:                tRailEnd,
           startPos:            arcStart.clone(),
@@ -670,6 +649,9 @@ export function buildSegments(eventTimes, options = {}) {
           midi:                notes[i].midi,
           linearDrag:          0,
         });
+
+        // Suppress the platform for this event — the ball descends into the pad body.
+        eventUsesSustainedRail[i] = true;
 
         cursor.copy(endRail);
         prevT = tRailEnd;
@@ -717,7 +699,7 @@ export function buildSegments(eventTimes, options = {}) {
               }
             } else {
               sideSign = nextLateralSign(sideSign, tNext);
-              const dx = sideSign * params.trajectory.targetSpeed * sg2Bounce;
+              const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sg2Bounce);
               const dy = -bounceVerticalDrop(gap2);
               const endNext = new THREE.Vector3(cursor.x + dx, cursor.y + dy, params.trajectory.ballZ);
               segments.push(makeKinematicSegment(cursor, endNext, tRailEnd, tNext, false, i + 1));

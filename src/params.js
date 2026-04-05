@@ -20,6 +20,8 @@ export const params = {
     /** Time (s) for the ball to move from pad to rail entry; capped vs total sustain span. */
     sustainEntryDuration: 0.1,
     targetSpeed:        8,
+    minSpatialX:        0,
+    minSpatialY:        0,
     maxSpatialGap:      2.5,
     /**
      * ROLL segments: if true, horizontal step uses the full real time gap (speed ≈ targetSpeed),
@@ -119,12 +121,18 @@ export const params = {
     pollWindow:           0.04,
     ballRadius:           0.32,
     squashDuration:       0.2,
+    squashAmount:         0.48,
+    /** Gap (s) between consecutive notes below which a note is treated as "fast". */
+    fastNoteThreshold:    0.15,
+    /** Trail brightness multiplier at maximum ball speed (1 = no boost). */
+    trailSpeedBoost:      2.5,
   },
   audio: {
     minNoteDuration: 0.02,
     maxNoteDuration: 1.2,
   },
   scene: {
+    masterScale:     1.0,
     backgroundColor: '#f2ece2',
     /** UnrealBloom — soft halo around emissive hits (pads, ball). Lower threshold = more bloom. */
     bloomStrength:   0.58,
@@ -177,6 +185,10 @@ export const params = {
     burstScatterXY:    2.8,
     burstScatterY:     2.5,
     burstScatterZ:     1.5,
+    /** Ripple rings on note hit */
+    rippleEnabled:     true,
+    rippleMaxRadius:   3.5,
+    rippleDuration:    0.55,
   },
   pitch: {
     midiMin: 36,

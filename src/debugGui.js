@@ -59,6 +59,8 @@ export function createDebugGui(ctx) {
   motion.add(params.trajectory, 'sustainPlatformDrop', 0.05, 2, 0.02).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'sustainEntryDuration', 0.03, 0.35, 0.01).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'targetSpeed', 0.5, 40, 0.5).onFinishChange(ctx.onRegenerateTrajectory);
+  motion.add(params.trajectory, 'minSpatialX',   0, 20, 0.1).onFinishChange(ctx.onRegenerateTrajectory);
+  motion.add(params.trajectory, 'minSpatialY',   0, 10, 0.1).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'maxSpatialGap', 0.2, 10, 0.1).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'gravity', 5, 120, 1).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'yDropMax', 0.2, 20, 0.1).onFinishChange(ctx.onRegenerateTrajectory);
@@ -118,9 +120,13 @@ export function createDebugGui(ctx) {
   main.add(params.main, 'trailCullWindow', 0.2, 15, 0.1);
   main.add(params.main, 'pollWindow', 0.01, 0.2, 0.005);
   main.add(params.main, 'ballRadius', 0.05, 1, 0.01);
-  main.add(params.main, 'squashDuration', 0.05, 0.8, 0.01);
+  main.add(params.main, 'squashDuration',      0.05, 0.8,  0.01);
+  main.add(params.main, 'squashAmount',         0,    1.5,  0.01);
+  main.add(params.main, 'fastNoteThreshold',    0,    0.5,  0.01).name('fast note threshold (s)');
+  main.add(params.main, 'trailSpeedBoost',      1,    5,    0.1 ).name('trail speed boost');
 
   const sc = gui.addFolder('Scene');
+  sc.add(params.scene, 'masterScale', 0.1, 5, 0.01).name('master scale');
   sc.add(params.scene, 'fov', 10, 100, 1).onChange(() => {
     ctx.camera.fov = params.scene.fov;
     ctx.camera.updateProjectionMatrix();
@@ -185,6 +191,9 @@ export function createDebugGui(ctx) {
   fx.add(params.fx, 'burstScatterXY', 0.5, 8, 0.1);
   fx.add(params.fx, 'burstScatterY', 0.5, 8, 0.1);
   fx.add(params.fx, 'burstScatterZ', 0.5, 8, 0.1);
+  fx.add(params.fx, 'rippleEnabled').name('ripple rings');
+  fx.add(params.fx, 'rippleMaxRadius', 0.5, 10, 0.1).name('ripple max radius');
+  fx.add(params.fx, 'rippleDuration', 0.1, 2.0, 0.05).name('ripple duration (s)');
 
   const pitch = gui.addFolder('Pitch → color (visual)');
   pitch.add(params.pitch, 'midiMin', 0, 127, 1);

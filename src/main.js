@@ -43,6 +43,7 @@ import {
   createWall, createWallBackground, createBall, createPlatformPool, createTrack,
   createSustainedRailsGroup,
   createTrail, createParticleSystem, triggerBurst, updateParticles,
+  createRipplePool, triggerRipple, updateRipples,
   createPathOverlayLine, updatePathOverlayGeometry,
   clampBallPositionToWall,
   setBallPitchTint,
@@ -225,7 +226,8 @@ const platformPool = createPlatformPool(scene, 80);
 void applyPlatformTexturesToPool(platformPool).catch(err =>
   console.warn('Platform PBR textures:', err),
 );
-const particles = createParticleSystem(scene);
+const particles  = createParticleSystem(scene);
+const ripplePool = createRipplePool(scene);
 const trail = createTrail(scene);
 
 /** Expected path (loaded JSON) — green */
@@ -356,16 +358,21 @@ function triggerSquash(squashState, now) {
  * @param {number} now
  */
 function updateBallSquash(mesh, squashState, now) {
-  if (!squashState.active) return;
+  const ms = params.scene.masterScale;
+  if (!squashState.active) {
+    mesh.scale.setScalar(ms);
+    return;
+  }
   const age = now - squashState.startTime;
   if (age > params.main.squashDuration) {
-    mesh.scale.set(1, 1, 1);
+    mesh.scale.setScalar(ms);
     squashState.active = false;
     return;
   }
-  const p = age / params.main.squashDuration;
+  const p   = age / params.main.squashDuration;
   const env = Math.sin(Math.PI * p) * Math.exp(-4 * p);
-  mesh.scale.set(1 + 0.42 * env, 1 - 0.48 * env, 1 + 0.42 * env);
+  const a   = params.main.squashAmount;
+  mesh.scale.set((1 + 0.875 * a * env) * ms, (1 - a * env) * ms, (1 + 0.875 * a * env) * ms);
 }
 
 let rollAngle = 0;
@@ -839,19 +846,25 @@ btnStop.addEventListener('click', () => {
  * @param {{ lastT: number, history: import('three').Vector3[] }} trailState
  * @param {import('three').Vector3} pos
  * @param {number} currentT
+ * @param {number} [speed]  ball speed (world units/s) — drives brightness + sample density
  */
-function updateTrail(trailObj, trailState, pos, currentT) {
-  if (currentT - trailState.lastT < params.main.trailInterval) return;
+function updateTrail(trailObj, trailState, pos, currentT, speed = 0) {
+  // Faster ball → sample more often (denser trail) and brighter
+  const refSpeed   = Math.max(1, params.trajectory.targetSpeed);
+  const sf         = Math.min(1, speed / (refSpeed * 1.5));          // 0–1
+  const interval   = params.main.trailInterval / Math.max(1, 1 + sf * 2);
+  if (currentT - trailState.lastT < interval) return;
   if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) return;
   trailState.lastT = currentT;
 
   trailState.history.push(pos.clone());
   if (trailState.history.length > trailObj.positions.length / 3) trailState.history.shift();
 
-  const len = trailState.history.length;
+  const len    = trailState.history.length;
   const posArr = trailObj.positions;
   const colArr = trailObj.colors;
   const { r, g, b } = trailObj.tint;
+  const boost  = 1 + sf * (params.main.trailSpeedBoost - 1);
 
   for (let i = 0; i < len; i++) {
     const v = trailState.history[i];
@@ -861,9 +874,10 @@ function updateTrail(trailObj, trailState, pos, currentT) {
     posArr[k + 2] = v.z;
 
     const life = i / len;
-    colArr[k]     = r * (0.35 + 0.65 * life);
-    colArr[k + 1] = g * (0.35 + 0.65 * life);
-    colArr[k + 2] = b * (0.35 + 0.65 * life);
+    const br   = Math.min(1, (0.35 + 0.65 * life) * boost);
+    colArr[k]     = r * br;
+    colArr[k + 1] = g * br;
+    colArr[k + 2] = b * br;
   }
 
   trailObj.line.geometry.attributes.position.needsUpdate = true;
@@ -909,7 +923,7 @@ function animate() {
   ball.rotation.z = -rollAngle;
 
   updateBallSquash(ball, primarySquash, currentT);
-  updateTrail(trail, primaryTrailState, visPos, currentT);
+  updateTrail(trail, primaryTrailState, visPos, currentT, state.vel.length());
 
   // ── Secondary balls ──────────────────────────────────────────────────────
   for (const sb of secondaryBalls) {
@@ -921,7 +935,7 @@ function animate() {
     }
     sb.ball.rotation.z = -sb.rollAngle;
     updateBallSquash(sb.ball, sb.squash, currentT);
-    updateTrail(sb.trail, sb.trailState, sbState.pos, currentT);
+    updateTrail(sb.trail, sb.trailState, sbState.pos, currentT, sbState.vel.length());
 
     // Platforms for secondary ball — use bundle-specific evaluators so pads
     // align with THIS ball's trajectory, not the primary one.
@@ -947,11 +961,25 @@ function animate() {
     updatePlatformAnimations(sb.platformPool, currentT);
   }
 
+  /**
+   * Returns true when the inter-note gap around event `i` is below the fast-note
+   * threshold — used to skip platform rendering and fire a cascade burst instead.
+   * @param {number[]} times
+   * @param {number} i
+   */
+  function isFastNote(times, i) {
+    const threshold = params.main.fastNoteThreshold;
+    const gapPrev = i > 0               ? times[i] - times[i - 1] : Infinity;
+    const gapNext = i < times.length - 1 ? times[i + 1] - times[i] : Infinity;
+    return Math.min(gapPrev, gapNext) < threshold;
+  }
+
   const nEvents = eventTimes.length;
   for (let i = 0; i < nEvents; i++) {
     if (activatedPlatforms.has(i)) continue;
     if (landingTypes[i] !== 'BOUNCE') continue;
     if (eventUsesSustainedRail[i]) continue;
+    if (isFastNote(eventTimes, i)) continue;        // fast notes: burst only, no pad
     const et = eventTimes[i];
     const m = params.main;
     if (et < currentT - m.platformPastWindow || et > currentT + m.lookahead) continue;
@@ -963,6 +991,7 @@ function animate() {
   cullOldPlatforms(platformPool, eventTimes, currentT, params.main.trailCullWindow);
   updatePlatformAnimations(platformPool, currentT);
   updateParticles(particles, currentT, dt);
+  updateRipples(ripplePool, currentT);
 
   const hits = pollEvents(eventTimes, firedEvents, currentT, params.main.pollWindow);
   for (const hit of hits) {
@@ -971,15 +1000,28 @@ function animate() {
     const isBounce = landingTypes[hit.index] === 'BOUNCE';
 
     const railOnly = eventUsesSustainedRail[hit.index];
-    /** Same conditions as platform activation — avoids “impact in empty air” when there is no pad. */
     const hasBouncePad = isBounce && !railOnly;
+    const fast = isFastNote(eventTimes, hit.index);
 
     if (hasBouncePad) {
       const impactPos = P(hit.time).clone();
       impactPos.z = 0.4;
       clampBallPositionToWall(impactPos, params.main.ballRadius);
-      triggerBurst(particles, impactPos, color, currentT);
-      animatePlatformHit(platformPool, hit.index, currentT, lastSecondsPerBeat);
+
+      if (fast) {
+        // Cascade: two bursts spread slightly around impact — no platform, no dip
+        triggerBurst(particles, impactPos, color, currentT);
+        const off = impactPos.clone();
+        off.x += (Math.random() - 0.5) * 0.8;
+        off.y += (Math.random() - 0.5) * 0.8;
+        triggerBurst(particles, off, color, currentT);
+      } else {
+        triggerBurst(particles, impactPos, color, currentT);
+        animatePlatformHit(platformPool, hit.index, currentT, lastSecondsPerBeat);
+      }
+
+      if (params.fx.rippleEnabled) triggerRipple(ripplePool, impactPos, color, currentT);
+
       triggerSquash(primarySquash, currentT);
       const padHex = pitchToPlatformColor(pitch);
       setBallPitchTint(ball, padHex);
@@ -1004,6 +1046,11 @@ function animate() {
       }
     }
   }
+
+  // Scale individual visual objects — layout/trajectory positions unchanged.
+  const ms = params.scene.masterScale;
+  if (trackGroup)        trackGroup.scale.setScalar(ms);
+  if (sustainedRailGroup) sustainedRailGroup.scale.setScalar(ms);
 
   updateCamera(camera, visPos, dt);
   updateKeyLight(keyLight, visPos.x, visPos.y);

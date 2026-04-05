@@ -56,10 +56,19 @@ export function getSegmentState(t) {
 }
 
 export function arrivalVelocity(t) {
-  // Evaluate 1 ms before the event so we get the incoming velocity, not the
-  // post-bounce outgoing velocity, while staying as close to the impact point
-  // as possible (smaller offset = more accurate tangent for platform tilt).
-  return getTrajectoryPoint(segments, t - 0.001).vel;
+  // Walk back from the event in small steps until we land in a kinematic
+  // (non-SUSTAINED) segment.  This prevents the circular arc tangent of a
+  // sustained tube from being mistaken for the ball's arrival direction when
+  // the arc ends right at the event time.
+  const offsets = [0.001, 0.01, 0.05, 0.15];
+  for (const dt of offsets) {
+    const state = getTrajectoryPoint(segments, t - dt);
+    if (state.type !== 'SUSTAINED' && state.type !== 'SUSTAIN_ENTRY') {
+      return state.vel;
+    }
+  }
+  // Fallback: use the last offset even if still in sustained (better than nothing)
+  return getTrajectoryPoint(segments, t - offsets[offsets.length - 1]).vel;
 }
 
 /** First segment of type ROLL (excludes gap-transition roll halves), for track placement */

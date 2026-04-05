@@ -12,7 +12,6 @@
  */
 
 import * as THREE from 'three';
-import { LineCurve3 } from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { TexturePass } from 'three/examples/jsm/postprocessing/TexturePass.js';
@@ -714,28 +713,29 @@ function setCylinderMeshAlongChord(mesh, dir) {
 }
 
 /**
- * Sustained notes: a single snake-like tube from the platform's exit edge, tangent-matched
- * to the trajectory, curving along the sustained arc to the note end.
+ * Sustained notes: a floating arc tube with symmetric gaps at both ends.
  *
- * When `platformExitEdge` + `sustainArc` are both present (normal case after segments.js
- * computes the bank-corrected exit point), one CatmullRomCurve3 is built:
- *   [ghost, exitEdge, arcStart, …arc samples…, endRail]
- * The ghost is placed opposite to the entry direction so Catmull-Rom's tangent at
- * `exitEdge` aligns with the trajectory at that point.
+ * The tube starts GAP_WORLD units into the arc (after the platform) and ends
+ * GAP_WORLD units before the arc finishes (before the next platform).  Both
+ * gaps are clamped to MAX_GAP_FRAC of the arc so short arcs keep a visible tube.
+ * The tube does not connect to either platform — it floats in the sustained space.
  *
- * Falls back to the legacy drop-connector + chord/arc geometry when data is missing.
+ * Falls back to a trimmed chord cylinder when sustainArc data is absent.
  */
 export function createSustainedRailsGroup(segments) {
+  const GAP_WORLD    = 1.0;   // world-unit gap trimmed from each end of the arc
+  const MAX_GAP_FRAC = 0.25;  // never trim more than 25 % from each end
+
   const group = new THREE.Group();
   for (const seg of segments) {
     if (seg.type !== 'SUSTAINED') continue;
-    const start = seg.startPos;   // = arcStart
-    const end   = seg.endPos;     // = endRail
+    const start = seg.startPos;
+    const end   = seg.endPos;
     if (!start || !end || typeof start.clone !== 'function' || typeof end.clone !== 'function') continue;
 
     const midi = seg.midi ?? 60;
     const emissive = pitchToNeonRailEmissive(midi);
-    const matCommon = {
+    const mat = new THREE.MeshStandardMaterial({
       color:             0x0a1018,
       emissive,
       emissiveIntensity: 0.75,
@@ -745,124 +745,59 @@ export function createSustainedRailsGroup(segments) {
       opacity:           0.38,
       side:              THREE.DoubleSide,
       depthWrite:        false,
-    };
+    });
 
     const tubeRadius = 0.48;
     const sa = seg.sustainArc;
 
-    // ── Primary path: smooth snake from platform exit edge through arc ────────
-    const pee = seg.platformExitEdge;
-    const hasExitEdge = pee != null
-      && Number.isFinite(pee.x) && Number.isFinite(pee.y) && Number.isFinite(pee.z);
-
-    if (hasExitEdge && sa && isValidSustainArcData(sa)) {
-      const raw = /** @type {{ center: import('three').Vector3 | { x: number, y: number, z: number }, radius: number, theta0: number, theta1: number, z: number, arcLength?: number }} */ (sa);
-      const center = raw.center instanceof THREE.Vector3
-        ? raw.center
-        : new THREE.Vector3(raw.center.x, raw.center.y, raw.center.z);
-      let arcLength = raw.arcLength;
-      if (arcLength == null || !Number.isFinite(arcLength)) {
-        arcLength = raw.radius * Math.abs(raw.theta1 - raw.theta0);
-      }
-      if (arcLength > 1e-6) {
-        const exitEdge = new THREE.Vector3(pee.x, pee.y, pee.z);
-
-        // Entry section: exitEdge → arcStart.
-        // Ghost placed backward along entry direction so Catmull-Rom tangent at
-        // exitEdge points in the right direction (downward into the tube).
-        const entryVec  = new THREE.Vector3().subVectors(start, exitEdge);
-        const entryLen  = Math.max(entryVec.length(), 0.05);
-        const entryDir  = entryVec.clone().normalize();
-        const ghost     = exitEdge.clone().addScaledVector(entryDir, -entryLen);
-
-        // Arc samples — stop short of endRail so there's a gap before the next platform.
-        // GAP_WORLD is the gap in world units; clamped to 25 % of arc length.
-        const GAP_WORLD = 1.0;
-        const gapFrac   = Math.min(0.25, arcLength > 1e-6 ? GAP_WORLD / arcLength : 0);
-        const tArcEnd   = 0.8 - gapFrac;
-        const arcCurve  = new SustainArcCurve3(center, raw.radius, raw.theta0, raw.theta1, raw.z);
-        const N_ARC     = Math.max(4, Math.min(12, Math.ceil(arcLength * 1.5)));
-        const arcPts    = [];
-        for (let k = 0; k <= N_ARC; k++) {
-          arcPts.push(arcCurve.getPoint((k / N_ARC) * tArcEnd));
-        }
-
-        // Full control-point chain: [ghost, exitEdge, arcStart, ...interior arc, endRail]
-        const ctrlPts = [ghost, exitEdge, ...arcPts];
-        const combined = new THREE.CatmullRomCurve3(ctrlPts, false, 'catmullrom', 0.5);
-
-        const totalLen = entryLen + arcLength * tArcEnd;
-        const tubular  = Math.max(24, Math.min(180, Math.ceil(totalLen * 4)));
-        const geo      = new THREE.TubeGeometry(combined, tubular, tubeRadius, 10, false);
-        const mat      = new THREE.MeshStandardMaterial(matCommon);
-        const mesh     = new THREE.Mesh(geo, mat);
-        mesh.castShadow    = true;
-        mesh.receiveShadow = true;
-        group.add(mesh);
-        continue;
-      }
-    }
-
-    // ── Legacy fallback: drop connector + chord / arc ─────────────────────────
-    if (seg.sustainPlatformPos && typeof seg.sustainPlatformPos.clone === 'function') {
-      const p0 = seg.sustainPlatformPos;
-      const p1 = start.clone();
-      const dropLen = p0.distanceTo(p1);
-      if (Number.isFinite(dropLen) && dropLen > 1e-4) {
-        const dropCurve = new LineCurve3(p0, p1);
-        const dropGeo = new THREE.TubeGeometry(
-          dropCurve,
-          Math.max(4, Math.ceil(dropLen * 6)),
-          0.36,
-          8,
-          false,
-        );
-        const dropMat = new THREE.MeshStandardMaterial({ ...matCommon, opacity: 0.32 });
-        const dropMesh = new THREE.Mesh(dropGeo, dropMat);
-        dropMesh.castShadow = true;
-        dropMesh.receiveShadow = true;
-        group.add(dropMesh);
-      }
-    }
-
-    const dir = end.clone().sub(start);
-    const len = dir.length();
-    if (!Number.isFinite(len) || len < 1e-4) continue;
-    dir.normalize();
-    if (!vec3Finite(dir)) continue;
-
-    const mid = start.clone().add(end).multiplyScalar(0.5);
-    if (!vec3Finite(mid)) continue;
-
-    let geo;
-    let useArcTube = false;
     if (sa && isValidSustainArcData(sa)) {
       const raw = /** @type {{ center: import('three').Vector3 | { x: number, y: number, z: number }, radius: number, theta0: number, theta1: number, z: number, arcLength?: number }} */ (sa);
       let arcLength = raw.arcLength;
       if (arcLength == null || !Number.isFinite(arcLength)) {
         arcLength = raw.radius * Math.abs(raw.theta1 - raw.theta0);
       }
+
       if (arcLength > 1e-6) {
         const center = raw.center instanceof THREE.Vector3
           ? raw.center
           : new THREE.Vector3(raw.center.x, raw.center.y, raw.center.z);
-        const curve   = new SustainArcCurve3(center, raw.radius, raw.theta0, raw.theta1, raw.z);
-        const tubular = Math.max(16, Math.min(128, Math.ceil(arcLength * 2.5)));
-        geo = new THREE.TubeGeometry(curve, tubular, tubeRadius, 10, false);
-        useArcTube = true;
+
+        // Symmetric gap — same world-unit trim at entry and exit
+        const gapFrac = Math.min(MAX_GAP_FRAC, GAP_WORLD / arcLength);
+        const tStart  = gapFrac;
+        const tEnd    = 1 - gapFrac;
+
+        if (tEnd > tStart + 1e-4) {
+          // Build a proper SustainArcCurve3 over the trimmed angle range so
+          // TubeGeometry gets a real THREE.Curve with computeFrenetFrames.
+          const dTheta   = raw.theta1 - raw.theta0;
+          const subTheta0 = raw.theta0 + tStart * dTheta;
+          const subTheta1 = raw.theta0 + tEnd   * dTheta;
+          const subArc   = new SustainArcCurve3(center, raw.radius, subTheta0, subTheta1, raw.z);
+          const visLen   = arcLength * (tEnd - tStart);
+          const tubular  = Math.max(16, Math.min(160, Math.ceil(visLen * 4)));
+          const geo      = new THREE.TubeGeometry(subArc, tubular, tubeRadius, 10, false);
+          const mesh    = new THREE.Mesh(geo, mat);
+          mesh.castShadow    = true;
+          mesh.receiveShadow = true;
+          group.add(mesh);
+          continue;
+        }
       }
     }
-    if (!useArcTube) {
-      geo = new THREE.CylinderGeometry(tubeRadius, tubeRadius, len, 22, 1, true);
-    }
-    const mat  = new THREE.MeshStandardMaterial(matCommon);
+
+    // ── Fallback: trimmed chord cylinder (no arc data) ────────────────────────
+    const dir = end.clone().sub(start);
+    const len = dir.length();
+    if (!Number.isFinite(len) || len < 1e-4) continue;
+    dir.normalize();
+    if (!vec3Finite(dir)) continue;
+
+    const trimmedLen = len * (1 - 2 * MAX_GAP_FRAC);
+    const geo  = new THREE.CylinderGeometry(tubeRadius, tubeRadius, trimmedLen, 22, 1, true);
     const mesh = new THREE.Mesh(geo, mat);
-    if (!useArcTube) {
-      setCylinderMeshAlongChord(mesh, dir);
-      mesh.position.copy(mid);
-    } else {
-      mesh.position.set(0, 0, 0);
-    }
+    setCylinderMeshAlongChord(mesh, dir);
+    mesh.position.copy(start.clone().lerp(end, 0.5));
     mesh.castShadow    = true;
     mesh.receiveShadow = true;
     group.add(mesh);
@@ -1045,5 +980,81 @@ export function updateParticles(bursts, now, dt) {
       v.multiplyScalar(params.fx.particleDamping);
     }
     burst.points.geometry.attributes.position.needsUpdate = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ripple rings
+// ---------------------------------------------------------------------------
+
+const RIPPLE_POOL_SIZE = 20;
+// Shared geometry: unit ring (innerR=0.82, outerR=1) scaled per-frame.
+// The ratio keeps the ring visually thin as it expands.
+const _rippleGeo = new THREE.RingGeometry(0.82, 1.0, 48);
+
+/**
+ * Creates a pool of reusable ripple ring meshes and adds them to the scene.
+ * @param {import('three').Scene} scene
+ */
+export function createRipplePool(scene) {
+  const pool = [];
+  for (let i = 0; i < RIPPLE_POOL_SIZE; i++) {
+    const mat  = new THREE.MeshBasicMaterial({
+      color:       0xffffff,
+      transparent: true,
+      opacity:     0,
+      side:        THREE.DoubleSide,
+      depthWrite:  false,
+    });
+    const mesh = new THREE.Mesh(_rippleGeo, mat);
+    mesh.visible      = false;
+    mesh.userData     = { active: false, birthTime: 0 };
+    mesh.layers.enable(1); // bloom layer
+    scene.add(mesh);
+    pool.push(mesh);
+  }
+  return pool;
+}
+
+/**
+ * Fire a ripple ring at `position`.
+ * @param {Array<import('three').Mesh>} pool
+ * @param {import('three').Vector3} position
+ * @param {number | string} color
+ * @param {number} now
+ */
+export function triggerRipple(pool, position, color, now) {
+  const ring = pool.find(r => !r.userData.active) ?? pool[0];
+  ring.userData.active    = true;
+  ring.userData.birthTime = now;
+  ring.position.set(position.x, position.y, 0.25); // flat against wall
+  ring.scale.setScalar(0.05);
+  ring.material.color.set(color);
+  ring.material.opacity = 1;
+  ring.visible = true;
+}
+
+/**
+ * Advance all active ripple rings each frame.
+ * @param {Array<import('three').Mesh>} pool
+ * @param {number} now
+ */
+export function updateRipples(pool, now) {
+  const fx = params.fx;
+  for (const ring of pool) {
+    if (!ring.userData.active) continue;
+    const age = now - ring.userData.birthTime;
+    const dur = fx.rippleDuration;
+    if (age >= dur) {
+      ring.userData.active  = false;
+      ring.visible          = false;
+      ring.material.opacity = 0;
+      continue;
+    }
+    const p = age / dur;
+    // Ease-out expansion: fast at start, slows as it reaches max radius
+    ring.scale.setScalar(fx.rippleMaxRadius * (1 - Math.pow(1 - p, 2.2)));
+    // Fade opacity — stay bright briefly then dim
+    ring.material.opacity = Math.pow(1 - p, 0.7) * 0.9;
   }
 }

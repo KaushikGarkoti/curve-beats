@@ -241,6 +241,7 @@ function dipEnvelope(p) {
 export function updatePlatformAnimations(pool, now) {
   const base = params.fx.platformEmissiveBase;
   const peak = params.fx.platformGlowPeak;
+  const ms   = params.scene.masterScale;
 
   for (const group of pool) {
     if (!group.visible) continue;
@@ -269,13 +270,15 @@ export function updatePlatformAnimations(pool, now) {
       const { startTime, duration } = group.userData.scaleAnim;
       const age = now - startTime;
       if (age > duration) {
-        group.scale.set(1, 1, 1);
+        group.scale.setScalar(ms);
         group.userData.scaleAnim = null;
       } else {
         const p   = age / duration;
         const env = Math.sin(Math.PI * p) * Math.exp(-3.5 * p);
-        group.scale.set(1 + 0.30 * env, 1 - 0.22 * env, 1 + 0.30 * env);
+        group.scale.set((1 + 0.30 * env) * ms, (1 - 0.22 * env) * ms, (1 + 0.30 * env) * ms);
       }
+    } else if (!group.userData.dipAnim) {
+      group.scale.setScalar(ms);
     }
 
     // ── Dip spring ──────────────────────────────────────────────────────────
