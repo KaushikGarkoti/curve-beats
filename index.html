@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Curve Beats — MIDI Trajectory</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a1e;
+      overflow: hidden;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+    #canvas-container { width: 100vw; height: 100vh; }
+    #chrome {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      padding: 16px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      background: linear-gradient(180deg, rgba(15,15,18,0.92) 0%, rgba(15,15,18,0.4) 100%);
+      pointer-events: auto;
+      z-index: 10;
+    }
+    #chrome h1 {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: #e8e6e3;
+      margin-right: 8px;
+    }
+    .btn {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.08);
+      color: #f0f0f0;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .btn:hover:not(:disabled) {
+      background: rgba(255,255,255,0.14);
+      border-color: rgba(255,255,255,0.28);
+    }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary {
+      background: linear-gradient(135deg, #3d7cff 0%, #7c5cff 100%);
+      border-color: transparent;
+    }
+    .btn-primary:hover:not(:disabled) {
+      filter: brightness(1.08);
+    }
+    #file-label { cursor: pointer; }
+    #midi-file, #path-ref-file { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+    #status {
+      font-size: 12px;
+      color: #9a9690;
+      max-width: 320px;
+    }
+    #status.ready { color: #7dffb3; }
+    #status.err { color: #ff8a8a; }
+    .chrome-label {
+      font-size: 12px;
+      color: #9a9690;
+      margin-right: -4px;
+    }
+    #midi-track-select {
+      font-size: 13px;
+      color: #e8e6e3;
+      background-color: #2d2d34;
+      background-image: linear-gradient(180deg, #35353e 0%, #28282f 100%);
+      border: 1px solid rgba(255,255,255,0.22);
+      border-radius: 8px;
+      padding: 6px 28px 6px 10px;
+      max-width: min(360px, 42vw);
+      cursor: pointer;
+      color-scheme: dark;
+      appearance: auto;
+    }
+    #midi-track-select:hover:not(:disabled) {
+      border-color: rgba(255,255,255,0.32);
+      background-color: #36363f;
+    }
+    #midi-track-select:focus {
+      outline: 2px solid rgba(90, 140, 255, 0.45);
+      outline-offset: 1px;
+    }
+    #midi-track-select option {
+      background-color: #2d2d34;
+      color: #e8e6e3;
+    }
+    #midi-track-select:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    /* ── Instrument panel ───────────────────────────────────────── */
+    #instrument-panel {
+      position: fixed;
+      top: 60px;
+      left: 0; right: 0;
+      padding: 0 20px 10px;
+      background: linear-gradient(180deg, rgba(15,15,18,0.88) 0%, rgba(15,15,18,0.0) 100%);
+      display: none;
+      flex-wrap: wrap;
+      gap: 8px 20px;
+      align-items: center;
+      z-index: 9;
+      pointer-events: auto;
+    }
+    #instrument-panel.visible { display: flex; }
+    .inst-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .inst-track-label {
+      font-size: 11px;
+      color: #9a9690;
+      white-space: nowrap;
+      max-width: 130px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .inst-select {
+      font-size: 12px;
+      color: #e8e6e3;
+      background: #28282f;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 6px;
+      padding: 4px 8px;
+      cursor: pointer;
+      color-scheme: dark;
+      appearance: auto;
+    }
+    .inst-select:hover { border-color: rgba(255,255,255,0.3); }
+    .inst-select:focus { outline: 2px solid rgba(90,140,255,0.45); outline-offset: 1px; }
+    #hud {
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      color: #c8c4bc;
+      font-size: 12px;
+      line-height: 1.8;
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+      z-index: 5;
+    }
+    #hud span { display: inline-block; min-width: 72px; color: #fff; }
+  </style>
+</head>
+<body>
+  <div id="chrome">
+    <h1>Curve Beats</h1>
+    <input type="file" id="midi-file" accept=".mid,.midi,audio/midi" />
+    <input type="file" id="path-ref-file" accept=".json,application/json" />
+    <label for="midi-file" class="btn" id="file-label">Upload MIDI</label>
+    <label for="midi-track-select" class="chrome-label">Track</label>
+    <select id="midi-track-select" disabled aria-label="MIDI track"></select>
+    <button type="button" class="btn btn-primary" id="btn-play" disabled>Play</button>
+    <button type="button" class="btn" id="btn-pause" disabled>Pause</button>
+    <button type="button" class="btn" id="btn-stop" disabled>Stop</button>
+    <p id="status">Loading default MIDI…</p>
+  </div>
+  <div id="instrument-panel" aria-label="Per-track instrument assignment"></div>
+  <div id="canvas-container"></div>
+  <div id="hud">
+    <div>t (Transport): <span id="hud-t">0.000</span></div>
+    <div>beat: <span id="hud-beat">—</span></div>
+    <div>platforms: <span id="hud-plat">0</span></div>
+    <div>path vs ref: <span id="hud-path-diff">—</span></div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
