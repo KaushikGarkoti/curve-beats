@@ -7,7 +7,7 @@ export const params = {
     bounceThreshold:    1.13,
     sustainDurationMin:   0.5,
     /** During sustained notes: vertical fall distance ≈ sustainFallSpeed × note span (seconds), capped. */
-    sustainFallSpeed:   5.5,
+    sustainFallSpeed:   10,
     sustainMaxFall:     14,
     /**
      * Sustained notes: max sagitta (arc bulge) as a fraction of chord length. 0 = straight parabolic segment.
@@ -20,8 +20,8 @@ export const params = {
     /** Time (s) for the ball to move from pad to rail entry; capped vs total sustain span. */
     sustainEntryDuration: 0.1,
     targetSpeed:        8,
-    minSpatialX:        0,
-    minSpatialY:        0,
+    minSpatialX:        1.3,
+    minSpatialY:        1.4,
     maxSpatialGap:      2.5,
     /**
      * ROLL segments: if true, horizontal step uses the full real time gap (speed ≈ targetSpeed),
@@ -132,7 +132,7 @@ export const params = {
     bloomRadius:     0.52,
     bloomThreshold:  0.22,
     /** Vertical FOV (deg). Lower = tighter zoom; raise if the ball clips the frame. */
-    fov:             73,
+    fov:             45,
     /** Linear fog — start / end distance (camera space). Set far ≤ 0 to disable. */
     fogNear:         55,
     fogFar:          240,
@@ -155,7 +155,7 @@ export const params = {
    */
   pathCompare: {
     showReference:   true,
-    showBakedPath:   true,
+    showBakedPath:   false,
     referenceOpacity: 0.5,
     bakedOpacity:    0.22,
     sampleDt:        0.02,
@@ -180,8 +180,8 @@ export const params = {
     burstScatterZ:     1.5,
     /** Ripple rings on note hit */
     rippleEnabled:     true,
-    rippleMaxRadius:   3.5,
-    rippleDuration:    0.55,
+    rippleMaxRadius:   0.7,
+    rippleDuration:    0.5,
   },
   pitch: {
     midiMin: 36,

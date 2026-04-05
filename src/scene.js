@@ -988,9 +988,8 @@ export function updateParticles(bursts, now, dt) {
 // ---------------------------------------------------------------------------
 
 const RIPPLE_POOL_SIZE = 20;
-// Shared geometry: unit ring (innerR=0.82, outerR=1) scaled per-frame.
-// The ratio keeps the ring visually thin as it expands.
-const _rippleGeo = new THREE.RingGeometry(0.82, 1.0, 48);
+// Shared geometry: thin ring ~mean radius 0.5 world units, scaled per-frame by rippleMaxRadius.
+const _rippleGeo = new THREE.RingGeometry(0.41, 0.59, 48);
 
 /**
  * Creates a pool of reusable ripple ring meshes and adds them to the scene.

@@ -46,7 +46,7 @@ export function createDebugGui(ctx) {
   motion.add(params.trajectory, 'sustainDurationMin', 0.5, 5, 0.05).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'sustainFallSpeed', 0.5, 20, 0.25).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'sustainMaxFall', 2, 40, 0.5).onFinishChange(ctx.onRegenerateTrajectory);
-  motion.add(params.trajectory, 'sustainArcBulge', 0, 0.45, 0.01).onFinishChange(ctx.onRegenerateTrajectory);
+  motion.add(params.trajectory, 'sustainArcBulge', 0, 0.6, 0.01).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'sustainPlatformDrop', 0.05, 2, 0.02).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'sustainEntryDuration', 0.03, 0.35, 0.01).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'targetSpeed', 0.5, 40, 0.5).onFinishChange(ctx.onRegenerateTrajectory);
