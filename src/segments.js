@@ -470,10 +470,24 @@ export function buildSegments(eventTimes, options = {}) {
         const arcStart = platformPos.clone();
         arcStart.y -= sustainDrop;
 
-        let tDrop = Math.min(tr.sustainEntryDuration, span * 0.28);
-        tDrop = Math.min(tDrop, span - 0.02);
-        if (tDrop >= span - 1e-3) tDrop = span * 0.42;
-        tDrop = Math.max(tDrop, Math.min(0.035, span * 0.2));
+        const sustainArc = computeSustainArc(arcStart, endRail, tr.sustainArcBulge, sideSign);
+        const chordLen = endRail.clone().sub(arcStart).length();
+        const pathAfterEntry = sustainArc?.arcLength ?? chordLen;
+
+        /**
+         * Entry uses constant |v| = sustainDrop / tDrop; sustained arc uses |v| ≈ pathAfterEntry / arcSpan.
+         * Old code picked tDrop from heuristics only, so those speeds were unrelated — the ball often
+         * slowed abruptly at the tube. Match magnitudes: sustainDrop/tDrop = pathAfterEntry/(span − tDrop).
+         */
+        let tDrop;
+        const denom = sustainDrop + pathAfterEntry;
+        if (denom > 1e-6 && span > 1e-6) {
+          tDrop = (sustainDrop * span) / denom;
+        } else {
+          tDrop = Math.min(tr.sustainEntryDuration, span * 0.28);
+        }
+        tDrop = Math.min(tDrop, span - 1e-4);
+        tDrop = Math.max(tDrop, 1e-4);
 
         const tEntryEnd = t_i + tDrop;
         const arcSpan   = Math.max(tRailEnd - tEntryEnd, 1e-6);
@@ -500,8 +514,6 @@ export function buildSegments(eventTimes, options = {}) {
         const v0    = disp.clone()
           .divideScalar(arcSpan)
           .sub(accel.clone().multiplyScalar(arcSpan * 0.5));
-
-        const sustainArc = computeSustainArc(arcStart, endRail, tr.sustainArcBulge, sideSign);
         let v0Seg = v0.clone();
         let accelSeg = accel.clone();
         if (sustainArc) {
