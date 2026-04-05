@@ -43,15 +43,6 @@ export function createDebugGui(ctx) {
   const motion = refPath.addFolder('Motion & landings');
   motion.add(params.trajectory, 'bounceThreshold', 0.2, 2.5, 0.01).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'rollSpatialGapUncapped').onFinishChange(ctx.onRegenerateTrajectory);
-  const rollSpiral = motion.addFolder('Roll spiral (long gaps)');
-  rollSpiral.add(params.trajectory, 'rollSpiralEnabled').onFinishChange(ctx.onRegenerateTrajectory);
-  rollSpiral.add(params.trajectory, 'rollSpiralMinGapSec', 0.2, 8, 0.1).onFinishChange(ctx.onRegenerateTrajectory);
-  rollSpiral.add(params.trajectory, 'rollSpiralNetCapSeconds', 0.5, 15, 0.1).onFinishChange(ctx.onRegenerateTrajectory);
-  rollSpiral.add(params.trajectory, 'rollSpiralTurns', 0.5, 12, 0.5).onFinishChange(ctx.onRegenerateTrajectory);
-  rollSpiral.add(params.trajectory, 'rollSpiralRadius', 0.2, 16, 0.1).onFinishChange(ctx.onRegenerateTrajectory);
-  rollSpiral.add(params.trajectory, 'rollSpiralDownDepth', 0, 3, 0.05).onFinishChange(ctx.onRegenerateTrajectory);
-  rollSpiral.add(params.trajectory, 'rollSpiralMinZ', 0, 0.5, 0.01).onFinishChange(ctx.onRegenerateTrajectory);
-  rollSpiral.open();
   motion.add(params.trajectory, 'sustainDurationMin', 0.5, 5, 0.05).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'sustainFallSpeed', 0.5, 20, 0.25).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'sustainMaxFall', 2, 40, 0.5).onFinishChange(ctx.onRegenerateTrajectory);
@@ -70,6 +61,8 @@ export function createDebugGui(ctx) {
   motion.add(params.trajectory, 'ballZ', -2, 4, 0.05).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'linearDrag', 0, 2.5, 0.02).onFinishChange(ctx.onRegenerateTrajectory);
   motion.add(params.trajectory, 'bounceAlternateSides').onFinishChange(ctx.onRegenerateTrajectory);
+  motion.add(params.trajectory, 'fastCompressX', 0.1, 1.0, 0.01).name('fast compress X').onFinishChange(ctx.onRegenerateTrajectory);
+  motion.add(params.trajectory, 'fastCompressY', 0.1, 1.0, 0.01).name('fast compress Y').onFinishChange(ctx.onRegenerateTrajectory);
   const sideZones = {
     json: JSON.stringify(params.trajectory.bounceAlternateSideRanges ?? []),
   };
@@ -124,6 +117,7 @@ export function createDebugGui(ctx) {
   main.add(params.main, 'squashAmount',         0,    1.5,  0.01);
   main.add(params.main, 'fastNoteThreshold',    0,    0.5,  0.01).name('fast note threshold (s)');
   main.add(params.main, 'trailSpeedBoost',      1,    5,    0.1 ).name('trail speed boost');
+  main.add(params.main, 'fastPadScale',         0.1,  1.0,  0.01).name('stair pad scale');
 
   const sc = gui.addFolder('Scene');
   sc.add(params.scene, 'masterScale', 0.1, 5, 0.01).name('master scale');

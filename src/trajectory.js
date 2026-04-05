@@ -74,7 +74,7 @@ export function arrivalVelocity(t) {
 /** First segment of type ROLL (excludes gap-transition roll halves), for track placement */
 export function findFirstRollSegment() {
   return segments.find(
-    s => (s.type === 'ROLL' || s.type === 'ROLL_SPIRAL') && !s.isGapTransition,
+    s => s.type === 'ROLL' && !s.isGapTransition,
   ) ?? null;
 }
 

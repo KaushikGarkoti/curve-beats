@@ -103,8 +103,9 @@ function orientPlatform(group, t, evalPos = P, evalVel = arrivalVelocity) {
  * @param {number} [padColorHex] optional pad color (MIDI pitch mapping)
  * @param {(t: number) => THREE.Vector3} [evalPos]  position evaluator (omit = primary trajectory)
  * @param {(t: number) => THREE.Vector3} [evalVel]  velocity evaluator (omit = primary trajectory)
+ * @param {boolean} [isStairPad=false]  true for fast-note stair pads (rendered smaller)
  */
-export function activatePlatform(pool, eventIndex, eventTime, padColorHex, evalPos, evalVel) {
+export function activatePlatform(pool, eventIndex, eventTime, padColorHex, evalPos, evalVel, isStairPad = false) {
   let group = pool.find(g => !g.visible);
   if (!group) {
     group = pool.reduce((oldest, g) =>
@@ -113,6 +114,7 @@ export function activatePlatform(pool, eventIndex, eventTime, padColorHex, evalP
   }
 
   group.userData.eventIndex = eventIndex;
+  group.userData.isStairPad = isStairPad;
   group.userData.scaleAnim  = null;
   group.userData.glowAnim   = null;
   group.scale.set(1, 1, 1);
@@ -245,6 +247,7 @@ export function updatePlatformAnimations(pool, now) {
 
   for (const group of pool) {
     if (!group.visible) continue;
+    const padScale = ms * (group.userData.isStairPad ? (params.main.fastPadScale ?? 0.55) : 1);
 
     const pad = group.children[0];
     const mat = pad?.material;
@@ -270,15 +273,15 @@ export function updatePlatformAnimations(pool, now) {
       const { startTime, duration } = group.userData.scaleAnim;
       const age = now - startTime;
       if (age > duration) {
-        group.scale.setScalar(ms);
+        group.scale.setScalar(padScale);
         group.userData.scaleAnim = null;
       } else {
         const p   = age / duration;
         const env = Math.sin(Math.PI * p) * Math.exp(-3.5 * p);
-        group.scale.set((1 + 0.30 * env) * ms, (1 - 0.22 * env) * ms, (1 + 0.30 * env) * ms);
+        group.scale.set((1 + 0.30 * env) * padScale, (1 - 0.22 * env) * padScale, (1 + 0.30 * env) * padScale);
       }
     } else if (!group.userData.dipAnim) {
-      group.scale.setScalar(ms);
+      group.scale.setScalar(padScale);
     }
 
     // ── Dip spring ──────────────────────────────────────────────────────────

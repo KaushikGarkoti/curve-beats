@@ -42,6 +42,20 @@ function nextLateralSign(sideSign, timeAtNoteOnset) {
   return bounceAlternateSidesAt(timeAtNoteOnset) ? -sideSign : sideSign;
 }
 
+/**
+ * Returns true when the inter-note gap around event `i` is below the fast-note threshold.
+ * Both the incoming and outgoing gap must be checked so isolated short gaps don't trigger it —
+ * the note must be part of a dense run.
+ * @param {number[]} eventTimes
+ * @param {number} i
+ */
+export function isFastNote(eventTimes, i) {
+  const threshold = params.main.fastNoteThreshold;
+  const gapPrev = i > 0                    ? eventTimes[i] - eventTimes[i - 1] : Infinity;
+  const gapNext = i < eventTimes.length - 1 ? eventTimes[i + 1] - eventTimes[i] : Infinity;
+  return Math.min(gapPrev, gapNext) < threshold;
+}
+
 /** @param {number} gapSeconds */
 export function spatialGap(gapSeconds) {
   if (gapSeconds <= 0) return 0;
@@ -58,96 +72,6 @@ export function spatialGapForRoll(gapSeconds) {
   if (gapSeconds <= 0) return 0;
   if (params.trajectory.rollSpatialGapUncapped) return gapSeconds;
   return Math.min(gapSeconds, params.trajectory.maxSpatialGap);
-}
-
-function shouldUseRollSpiral(gapSeconds, isRoll) {
-  const tr = params.trajectory;
-  return isRoll && tr.rollSpiralEnabled && gapSeconds >= tr.rollSpiralMinGapSec;
-}
-
-/** Net “seconds” along chord for spiral roll lateral extent. */
-function spiralNetGapSeconds(gapSeconds) {
-  const tr = params.trajectory;
-  const cap = tr.rollSpiralNetCapSeconds;
-  if (typeof cap === 'number' && cap > 0) {
-    return Math.min(gapSeconds, cap);
-  }
-  return Math.min(gapSeconds, tr.maxSpatialGap);
-}
-
-const WORLD_DOWN = new THREE.Vector3(0, -1, 0);
-
-/**
- * Cylinder cross-section basis: chord tangent t; eDown = world-down projected ⊥ t; eSide = t × eDown.
- * @param {THREE.Vector3} start
- * @param {THREE.Vector3} end
- */
-function spiralCylinderBasis(start, end) {
-  const chord = new THREE.Vector3().subVectors(end, start);
-  const len = chord.length();
-  if (len < 1e-8) {
-    return {
-      t:      new THREE.Vector3(1, 0, 0),
-      eSide:  new THREE.Vector3(0, 0, 1),
-      eDown:  new THREE.Vector3(0, -1, 0),
-    };
-  }
-  const t = chord.multiplyScalar(1 / len);
-  let eDown = WORLD_DOWN.clone().sub(t.clone().multiplyScalar(WORLD_DOWN.dot(t)));
-  if (eDown.lengthSq() < 1e-12) {
-    eDown = new THREE.Vector3(0, 0, 1).sub(t.clone().multiplyScalar(t.z));
-    if (eDown.lengthSq() < 1e-12) {
-      eDown.set(1, 0, 0).sub(t.clone().multiplyScalar(t.x));
-    }
-  }
-  eDown.normalize();
-  const eSide = new THREE.Vector3().crossVectors(t, eDown).normalize();
-  return { t, eSide, eDown };
-}
-
-/**
- * Cylindrical helix along the chord + sin²(πu) envelope, extra world-down drop, Z clamped in front of the wall.
- * @param {number} u ∈ [0,1]
- */
-function rollSpiralPosition(start, end, u, turns, radius, downDepth, zMin) {
-  const { eSide, eDown } = spiralCylinderBasis(start.clone(), end.clone());
-  const base = start.clone().lerp(end, u);
-  const env = Math.sin(Math.PI * u);
-  const env2 = env * env;
-  const theta = 2 * Math.PI * turns * u;
-  const c = Math.cos(theta);
-  const s = Math.sin(theta);
-  const r = radius * env2;
-  const cyl = eSide.clone().multiplyScalar(r * c).addScaledVector(eDown, r * s);
-  const down = WORLD_DOWN.clone().multiplyScalar(downDepth * env2);
-  const pos = base.add(cyl).add(down);
-  if (pos.z < zMin) pos.z = zMin;
-  return pos;
-}
-
-/** dP/du (analytic; matches unclamped motion; Z clamp applied only to position). */
-function rollSpiralDerivativeDu(start, end, u, turns, radius, downDepth) {
-  const { eSide, eDown } = spiralCylinderBasis(start.clone(), end.clone());
-  const dBase = new THREE.Vector3().subVectors(end, start);
-
-  const env = Math.sin(Math.PI * u);
-  const env2 = env * env;
-  const denv2 = Math.PI * Math.sin(2 * Math.PI * u);
-
-  const theta = 2 * Math.PI * turns * u;
-  const dtheta = 2 * Math.PI * turns;
-  const c = Math.cos(theta);
-  const s = Math.sin(theta);
-
-  const r = radius * env2;
-  const drdu = radius * denv2;
-  const radial = eSide.clone().multiplyScalar(c).addScaledVector(eDown, s);
-  const dradialDu = eSide.clone().multiplyScalar(-s * dtheta).addScaledVector(eDown, c * dtheta);
-
-  const dcyl = radial.clone().multiplyScalar(drdu).addScaledVector(dradialDu, r);
-  const ddown = WORLD_DOWN.clone().multiplyScalar(downDepth * denv2);
-
-  return dBase.add(dcyl).add(ddown);
 }
 
 /**
@@ -200,17 +124,6 @@ export function velAtSegmentEnd(seg) {
       0,
     );
   }
-  if (seg.type === 'ROLL_SPIRAL') {
-    const span = Math.max(seg.tEnd - seg.tStart, 1e-9);
-    const dP_du = rollSpiralDerivativeDu(
-      seg.startPos,
-      seg.endPos,
-      1,
-      seg.spiralTurns,
-      seg.spiralRadius,
-    );
-    return dP_du.multiplyScalar(1 / span);
-  }
   return seg.v0.clone().addScaledVector(seg.accel, dt);
 }
 
@@ -239,16 +152,18 @@ export function computeLandings(eventTimes, bounceThreshold) {
     let endPos;
     if (isRoll) {
       sideSign = nextLateralSign(sideSign, tEnd);
-      const sgNet = shouldUseRollSpiral(gap, true) ? spiralNetGapSeconds(gap) : sgRoll;
       endPos = new THREE.Vector3(
-        cursor.x + sideSign * params.trajectory.targetSpeed * sgNet,
+        cursor.x + sideSign * params.trajectory.targetSpeed * sgRoll,
         cursor.y,
         params.trajectory.ballZ
       );
     } else {
       sideSign = nextLateralSign(sideSign, tEnd);
-      const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce);
-      const dy = -bounceVerticalDrop(gap);
+      const fast = isFastNote(eventTimes, i);
+      const cx = fast ? params.trajectory.fastCompressX : 1;
+      const cy = fast ? params.trajectory.fastCompressY : 1;
+      const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce) * cx;
+      const dy = -bounceVerticalDrop(gap) * cy;
       endPos = new THREE.Vector3(cursor.x + dx, cursor.y + dy, params.trajectory.ballZ);
     }
 
@@ -292,7 +207,7 @@ function syncLandingsFromSegments(segments, eventTimes) {
     }
 
     landingPositions.push(hit.endPos.clone());
-    landingTypes.push(hit.type === 'ROLL' || hit.type === 'ROLL_SPIRAL' ? 'ROLL' : 'BOUNCE');
+    landingTypes.push(hit.type === 'ROLL' ? 'ROLL' : 'BOUNCE');
   }
 
   return { landingPositions, landingTypes };
@@ -414,35 +329,19 @@ export function buildSegments(eventTimes, options = {}) {
       if (isRoll) {
         sideSign = nextLateralSign(sideSign, tEnd);
         const tr = params.trajectory;
-        if (shouldUseRollSpiral(gap, true)) {
-          const sgNet = spiralNetGapSeconds(gap);
-          endPos = new THREE.Vector3(
-            cursor.x + sideSign * tr.targetSpeed * sgNet,
-            cursor.y,
-            tr.ballZ,
-          );
-          segments.push({
-            type:          'ROLL_SPIRAL',
-            tStart:        tStart,
-            tEnd:          tEnd,
-            startPos:      cursor.clone(),
-            endPos:        endPos.clone(),
-            spiralTurns:   tr.rollSpiralTurns,
-            spiralRadius:  tr.rollSpiralRadius,
-            eventIndex:    i,
-          });
-        } else {
-          endPos = new THREE.Vector3(
-            cursor.x + sideSign * tr.targetSpeed * sgRoll,
-            cursor.y,
-            tr.ballZ,
-          );
-          segments.push(makeKinematicSegment(cursor, endPos, tStart, tEnd, true, i));
-        }
+        endPos = new THREE.Vector3(
+          cursor.x + sideSign * tr.targetSpeed * sgRoll,
+          cursor.y,
+          tr.ballZ,
+        );
+        segments.push(makeKinematicSegment(cursor, endPos, tStart, tEnd, true, i));
       } else {
         sideSign = nextLateralSign(sideSign, tEnd);
-        const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce);
-        const dy = -bounceVerticalDrop(gap);
+        const fast = isFastNote(eventTimes, i);
+        const cx = fast ? params.trajectory.fastCompressX : 1;
+        const cy = fast ? params.trajectory.fastCompressY : 1;
+        const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce) * cx;
+        const dy = -bounceVerticalDrop(gap) * cy;
         endPos = new THREE.Vector3(cursor.x + dx, cursor.y + dy, params.trajectory.ballZ);
         segments.push(makeKinematicSegment(cursor, endPos, tStart, tEnd, false, i));
       }
@@ -485,38 +384,17 @@ export function buildSegments(eventTimes, options = {}) {
       if (isRoll) {
         sideSign = nextLateralSign(sideSign, t_i);
         const tr = params.trajectory;
-        if (shouldUseRollSpiral(gap, true)) {
-          const sgNet = spiralNetGapSeconds(gap);
-          endPos = new THREE.Vector3(
-            cursor.x + sideSign * tr.targetSpeed * sgNet,
-            cursor.y,
-            tr.ballZ,
-          );
-          const seg = {
-            type:          'ROLL_SPIRAL',
-            tStart:        prevT,
-            tEnd:          t_i,
-            startPos:      cursor.clone(),
-            endPos:        endPos.clone(),
-            spiralTurns:   tr.rollSpiralTurns,
-            spiralRadius:  tr.rollSpiralRadius,
-            eventIndex:    i,
-          };
-          Object.assign(seg, meta(false, null, null));
-          segments.push(seg);
-        } else {
-          endPos = new THREE.Vector3(
-            cursor.x + sideSign * tr.targetSpeed * sgRoll,
-            cursor.y,
-            tr.ballZ,
-          );
-          const seg = makeKinematicSegment(cursor, endPos, prevT, t_i, true, i);
-          Object.assign(seg, meta(false, null, null));
-          segments.push(seg);
-        }
+        endPos = new THREE.Vector3(
+          cursor.x + sideSign * tr.targetSpeed * sgRoll,
+          cursor.y,
+          tr.ballZ,
+        );
+        const seg = makeKinematicSegment(cursor, endPos, prevT, t_i, true, i);
+        Object.assign(seg, meta(false, null, null));
+        segments.push(seg);
       } else {
         const prevSeg = segments[segments.length - 1];
-        if (prevSeg && (prevSeg.type === 'ROLL' || prevSeg.type === 'ROLL_SPIRAL')) {
+        if (prevSeg && prevSeg.type === 'ROLL') {
           const vRoll = velAtSegmentEnd(prevSeg);
           segments.push(makeBounceAfterRoll(cursor, prevT, t_i, i, vRoll));
           const seg = segments[segments.length - 1];
@@ -525,8 +403,11 @@ export function buildSegments(eventTimes, options = {}) {
           sideSign = endPos.x >= 0 ? 1 : -1;
         } else {
           sideSign = nextLateralSign(sideSign, t_i);
-          const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce);
-          const dy = -bounceVerticalDrop(gap);
+          const fast = isFastNote(eventTimes, i);
+          const cx = fast ? params.trajectory.fastCompressX : 1;
+          const cy = fast ? params.trajectory.fastCompressY : 1;
+          const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sgBounce) * cx;
+          const dy = -bounceVerticalDrop(gap) * cy;
           endPos = new THREE.Vector3(cursor.x + dx, cursor.y + dy, params.trajectory.ballZ);
 
           const g = params.gap;
@@ -663,44 +544,27 @@ export function buildSegments(eventTimes, options = {}) {
             const sg2Roll = spatialGapForRoll(gap2);
             const sg2Bounce = spatialGap(gap2);
             const isRoll2 = gap2 >= bounceThreshold;
-            if (!isRoll2 && segBeforeRail && (segBeforeRail.type === 'ROLL' || segBeforeRail.type === 'ROLL_SPIRAL')) {
+            if (!isRoll2 && segBeforeRail && segBeforeRail.type === 'ROLL') {
               const vRoll = velAtSegmentEnd(segBeforeRail);
               segments.push(makeBounceAfterRoll(cursor, tRailEnd, tNext, i + 1, vRoll));
               cursor.copy(segments[segments.length - 1].endPos);
               sideSign = cursor.x >= 0 ? 1 : -1;
             } else if (isRoll2) {
               sideSign = nextLateralSign(sideSign, tNext);
-              if (shouldUseRollSpiral(gap2, true)) {
-                const sgNet = spiralNetGapSeconds(gap2);
-                const endNext = new THREE.Vector3(
-                  cursor.x + sideSign * tr.targetSpeed * sgNet,
-                  cursor.y,
-                  tr.ballZ,
-                );
-                segments.push({
-                  type:          'ROLL_SPIRAL',
-                  tStart:        tRailEnd,
-                  tEnd:          tNext,
-                  startPos:      cursor.clone(),
-                  endPos:        endNext.clone(),
-                  spiralTurns:   tr.rollSpiralTurns,
-                  spiralRadius:  tr.rollSpiralRadius,
-                  eventIndex:    i + 1,
-                });
-                cursor.copy(endNext);
-              } else {
-                const endNext = new THREE.Vector3(
-                  cursor.x + sideSign * params.trajectory.targetSpeed * sg2Roll,
-                  cursor.y,
-                  params.trajectory.ballZ,
-                );
-                segments.push(makeKinematicSegment(cursor, endNext, tRailEnd, tNext, true, i + 1));
-                cursor.copy(endNext);
-              }
+              const endNext = new THREE.Vector3(
+                cursor.x + sideSign * params.trajectory.targetSpeed * sg2Roll,
+                cursor.y,
+                params.trajectory.ballZ,
+              );
+              segments.push(makeKinematicSegment(cursor, endNext, tRailEnd, tNext, true, i + 1));
+              cursor.copy(endNext);
             } else {
               sideSign = nextLateralSign(sideSign, tNext);
-              const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sg2Bounce);
-              const dy = -bounceVerticalDrop(gap2);
+              const fast = isFastNote(eventTimes, i + 1);
+              const cx = fast ? params.trajectory.fastCompressX : 1;
+              const cy = fast ? params.trajectory.fastCompressY : 1;
+              const dx = sideSign * Math.max(params.trajectory.minSpatialX, params.trajectory.targetSpeed * sg2Bounce) * cx;
+              const dy = -bounceVerticalDrop(gap2) * cy;
               const endNext = new THREE.Vector3(cursor.x + dx, cursor.y + dy, params.trajectory.ballZ);
               segments.push(makeKinematicSegment(cursor, endNext, tRailEnd, tNext, false, i + 1));
               cursor.copy(endNext);
@@ -760,31 +624,6 @@ export function getTrajectoryPoint(segs, t) {
   if (seg.type === 'BOUNCE' && seg.linearDrag > 0) {
     const { pos, vel } = sampleBounceRK4(seg.startPos, seg.v0, s, seg.linearDrag);
     return { pos, vel, type: seg.type, segIndex: i };
-  }
-
-  if (seg.type === 'ROLL_SPIRAL') {
-    const tr = params.trajectory;
-    const span = Math.max(seg.tEnd - seg.tStart, 1e-9);
-    const u = s / span;
-    const pos = rollSpiralPosition(
-      seg.startPos,
-      seg.endPos,
-      u,
-      seg.spiralTurns,
-      seg.spiralRadius,
-      tr.rollSpiralDownDepth,
-      tr.rollSpiralMinZ,
-    );
-    const dP_du = rollSpiralDerivativeDu(
-      seg.startPos,
-      seg.endPos,
-      u,
-      seg.spiralTurns,
-      seg.spiralRadius,
-      tr.rollSpiralDownDepth,
-    );
-    const vel = dP_du.multiplyScalar(1 / span);
-    return { pos, vel, type: 'ROLL', segIndex: i };
   }
 
   if (seg.type === 'SUSTAINED' && seg.sustainArc && isValidSustainArcData(seg.sustainArc)) {

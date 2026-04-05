@@ -29,24 +29,6 @@ export const params = {
      * uses `maxSpatialGap` like bounces (legacy, keeps path more compact).
      */
     rollSpatialGapUncapped: true,
-    /**
-     * Long ROLL gaps: follow a spiral around the chord instead of a straight line. Net lateral
-     * movement uses min(gap, rollSpiralNetCapSeconds) × targetSpeed so the path stays compact
-     * while extra time is spent in loops (see rollSpiralTurns / rollSpiralRadius).
-     */
-    rollSpiralEnabled: true,
-    /** Minimum gap (s) before a ROLL can use spiral mode (must also be ≥ bounceThreshold). */
-    rollSpiralMinGapSec: 1.2,
-    /** Net “time” (s) for lateral chord length: min(gap, this) × targetSpeed. */
-    rollSpiralNetCapSeconds: 2.5,
-    /** Number of full loops in the spiral envelope (0 → 1). */
-    rollSpiralTurns: 4,
-    /** Cylinder cross-section radius (world units). */
-    rollSpiralRadius: 5,
-    /** Extra drop along world −Y at mid-envelope (sin²); keeps spiral biased downward. */
-    rollSpiralDownDepth: 0.45,
-    /** Never move the path behind the wall plane (world Z). */
-    rollSpiralMinZ: 0.08,
     gravity:            40,
     /**
      * Max vertical drop per bounce landing (world units). Must be large enough to scale with
@@ -79,6 +61,15 @@ export const params = {
      * @type {{ tStart: number, tEnd: number, bounceAlternateSides: boolean }[]}
      */
     bounceAlternateSideRanges: [],
+    /**
+     * Horizontal step multiplier for fast notes (gap < fastNoteThreshold).
+     * < 1 compresses lateral spacing so fast runs form a tight staircase.
+     */
+    fastCompressX: 0.42,
+    /**
+     * Vertical drop multiplier for fast notes.  < 1 keeps stair steps shallow.
+     */
+    fastCompressY: 0.50,
   },
   camera: {
     /**
@@ -124,6 +115,8 @@ export const params = {
     squashAmount:         0.48,
     /** Gap (s) between consecutive notes below which a note is treated as "fast". */
     fastNoteThreshold:    0.15,
+    /** Scale of stair pads for fast notes relative to normal pads (masterScale still applies). */
+    fastPadScale:         0.55,
     /** Trail brightness multiplier at maximum ball speed (1 = no boost). */
     trailSpeedBoost:      2.5,
   },

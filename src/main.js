@@ -49,11 +49,12 @@ import {
   setBallPitchTint,
 } from './scene.js';
 import { loadWallTexturesAsync } from './wallTextures.js';
-import { applyPlatformTexturesToPool } from './platformTextures.js';
+import { applyPlatformTexturesToPool, publicTextureUrl } from './platformTextures.js';
 import {
   activatePlatform, cullOldPlatforms, resetPlatformPool,
   animatePlatformHit, updatePlatformAnimations,
 } from './platforms.js';
+import { isFastNote } from './segments.js';
 import { updateCamera, updateKeyLight, onResize, resetCameraFollow } from './camera.js';
 import { params } from './params.js';
 import { createDebugGui } from './debugGui.js';
@@ -84,6 +85,7 @@ const seekTimeEl = document.getElementById('seek-time');
 const btnSeekBack = document.getElementById('btn-seek-back');
 const btnSeekFwd = document.getElementById('btn-seek-fwd');
 const instrumentPanel = document.getElementById('instrument-panel');
+const midiSelect = /** @type {HTMLSelectElement | null} */ (document.getElementById('midi-select'));
 
 /** Timeline length (seconds) for scrub bar — from last successful parse. */
 let lastDurationSeconds = 0;
@@ -370,7 +372,11 @@ function updateBallSquash(mesh, squashState, now) {
     return;
   }
   const p   = age / params.main.squashDuration;
-  const env = Math.sin(Math.PI * p) * Math.exp(-4 * p);
+  // Two-phase: compress on landing (0→0.35), then stretch/return (0.35→1).
+  // Peaks at 1.0 so squashAmount directly sets max deformation fraction.
+  const env = p < 0.35
+    ? Math.sin(Math.PI * (p / 0.35))
+    : Math.sin(Math.PI * ((p - 0.35) / 0.65)) * 0.4;
   const a   = params.main.squashAmount;
   mesh.scale.set((1 + 0.875 * a * env) * ms, (1 - a * env) * ms, (1 + 0.875 * a * env) * ms);
 }
@@ -415,6 +421,8 @@ function addSecondaryBall(trackIndex) {
   const sbBall = createBall(scene, tintColor);
   const sbPool = createPlatformPool(scene, 40);
   const sbTrail = createTrail(scene, tintColor);
+  const sbParticles = createParticleSystem(scene);
+  const sbRipplePool = createRipplePool(scene);
   secondaryBalls.push({
     trackIndex,
     bundle,
@@ -426,6 +434,8 @@ function addSecondaryBall(trackIndex) {
     rollAngle: 0,
     squash: { active: false, startTime: 0 },
     firedEvents: createEventTracker(),
+    particles: sbParticles,
+    ripplePool: sbRipplePool,
   });
   void applyPlatformTexturesToPool(sbPool).catch(err =>
     console.warn('Platform PBR textures (secondary):', err),
@@ -437,6 +447,12 @@ function disposeSecondaryBall(entry) {
   scene.remove(entry.ball);
   scene.remove(entry.trail.line);
   for (const group of entry.platformPool) scene.remove(group);
+  if (entry.particles) {
+    for (const p of entry.particles) { p.mesh.visible = false; scene.remove(p.mesh); }
+  }
+  if (entry.ripplePool) {
+    for (const r of entry.ripplePool) { r.visible = false; scene.remove(r); }
+  }
 }
 
 /** @param {number} trackIndex */
@@ -636,6 +652,8 @@ async function applyParsedMidi(parsed) {
 
   // Remove any secondary balls from the previous MIDI (track layout may differ)
   clearSecondaryBalls();
+  // Hide pooled platforms from the previous curve (lookahead only reuses a subset of slots)
+  resetPlatformPool(platformPool);
 
   if (!notes.length) {
     setStatus(
@@ -700,6 +718,76 @@ async function applyParsedMidi(parsed) {
   setStatus(`Ready — ${trackSummary}, ~${duration.toFixed(1)}s`, 'ready');
 }
 
+/**
+ * @returns {Promise<Array<{ file: string, label?: string }>>}
+ */
+async function fetchMidiManifest() {
+  const url = publicTextureUrl('midis/manifest.json');
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(String(r.status));
+    const data = await r.json();
+    if (!Array.isArray(data)) throw new Error('manifest must be an array');
+    return data;
+  } catch (e) {
+    console.warn('bundled MIDI manifest: using fallback list', e);
+    return [
+      { file: 'midi.json', label: 'Default' },
+      { file: 'believer.json', label: 'Believer' },
+      { file: 'VisiPiano.json', label: 'Visi Piano' },
+    ];
+  }
+}
+
+async function populateBundledMidiSelect() {
+  if (!midiSelect) return;
+  const list = await fetchMidiManifest();
+  midiSelect.innerHTML = '';
+  const opt0 = document.createElement('option');
+  opt0.value = '';
+  opt0.textContent = 'Bundled MIDI…';
+  midiSelect.appendChild(opt0);
+  for (const item of list) {
+    const f = item.file;
+    if (!f) continue;
+    const label = item.label ?? f;
+    const opt = document.createElement('option');
+    opt.value = f;
+    opt.textContent = label;
+    midiSelect.appendChild(opt);
+  }
+}
+
+/**
+ * Load a `.json` export or raw `.mid` / `.midi` from `public/midis/<filename>`.
+ * @param {string} filename
+ */
+async function applyBundledMidiFromPublic(filename) {
+  const url = publicTextureUrl(`midis/${encodeURIComponent(filename)}`);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status} for ${filename}`);
+  const ext = filename.toLowerCase().split('.').pop() ?? '';
+  resetTrackInstruments();
+
+  if (ext === 'json') {
+    const data = await r.json();
+    lastJsonData = data;
+    lastMidiBuffer = null;
+    const parsed = parseMidiJsonExport(data);
+    await applyParsedMidi(parsed);
+  } else if (ext === 'mid' || ext === 'midi') {
+    const buf = await r.arrayBuffer();
+    lastMidiBuffer = buf;
+    lastJsonData = null;
+    const parsed = parseMidiBuffer(buf);
+    await applyParsedMidi(parsed);
+  } else {
+    throw new Error(`Unsupported file type: ${filename}`);
+  }
+
+  if (midiSelect) midiSelect.value = filename;
+}
+
 async function applyMidiBuffer(buffer) {
   setStatus('Parsing MIDI…', '');
   btnPlay.disabled = true;
@@ -709,6 +797,7 @@ async function applyMidiBuffer(buffer) {
   resetTrackInstruments();
   lastMidiBuffer = buffer;
   lastJsonData = null;
+  if (midiSelect) midiSelect.value = '';
 
   let parsed;
   try {
@@ -723,6 +812,7 @@ async function applyMidiBuffer(buffer) {
 }
 
 void (async () => {
+  await populateBundledMidiSelect();
   setStatus('Loading default MIDI…', '');
   btnPlay.disabled = true;
   btnPause.disabled = true;
@@ -732,6 +822,7 @@ void (async () => {
   try {
     const parsed = parseMidiJsonExport(defaultMidiJson);
     await applyParsedMidi(parsed);
+    if (midiSelect) midiSelect.value = 'midi.json';
   } catch (e) {
     console.error(e);
     setStatus(
@@ -755,6 +846,21 @@ fileInput.addEventListener('change', async () => {
     setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`, 'err');
   }
   fileInput.value = '';
+});
+
+midiSelect?.addEventListener('change', async () => {
+  const f = midiSelect.value;
+  if (!f) return;
+  try {
+    setStatus('Loading bundled MIDI…', '');
+    btnPlay.disabled = true;
+    btnPause.disabled = true;
+    btnStop.disabled = true;
+    await applyBundledMidiFromPublic(f);
+  } catch (e) {
+    console.error(e);
+    setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`, 'err');
+  }
 });
 
 btnTracksAll?.addEventListener('click', () => {
@@ -954,24 +1060,14 @@ function animate() {
       const et = sbEventTimes[i];
       if (et < currentT - m.platformPastWindow || et > currentT + m.lookahead) continue;
       const pitch = sbLandingPitches[i] ?? 60;
-      activatePlatform(sb.platformPool, i, et, pitchToPlatformColor(pitch), sbEvalPos, sbEvalVel);
+      const fast = isFastNote(sbEventTimes, i);
+      activatePlatform(sb.platformPool, i, et, pitchToPlatformColor(pitch), sbEvalPos, sbEvalVel, fast);
       sb.activatedPlatforms.add(i);
     }
     cullOldPlatforms(sb.platformPool, sbEventTimes, currentT, m.trailCullWindow);
     updatePlatformAnimations(sb.platformPool, currentT);
-  }
-
-  /**
-   * Returns true when the inter-note gap around event `i` is below the fast-note
-   * threshold — used to skip platform rendering and fire a cascade burst instead.
-   * @param {number[]} times
-   * @param {number} i
-   */
-  function isFastNote(times, i) {
-    const threshold = params.main.fastNoteThreshold;
-    const gapPrev = i > 0               ? times[i] - times[i - 1] : Infinity;
-    const gapNext = i < times.length - 1 ? times[i + 1] - times[i] : Infinity;
-    return Math.min(gapPrev, gapNext) < threshold;
+    updateParticles(sb.particles, currentT, dt);
+    updateRipples(sb.ripplePool, currentT);
   }
 
   const nEvents = eventTimes.length;
@@ -979,12 +1075,12 @@ function animate() {
     if (activatedPlatforms.has(i)) continue;
     if (landingTypes[i] !== 'BOUNCE') continue;
     if (eventUsesSustainedRail[i]) continue;
-    if (isFastNote(eventTimes, i)) continue;        // fast notes: burst only, no pad
     const et = eventTimes[i];
     const m = params.main;
     if (et < currentT - m.platformPastWindow || et > currentT + m.lookahead) continue;
     const pitch = landingPitches[i] ?? 60;
-    activatePlatform(platformPool, i, et, pitchToPlatformColor(pitch));
+    const fast = isFastNote(eventTimes, i);
+    activatePlatform(platformPool, i, et, pitchToPlatformColor(pitch), undefined, undefined, fast);
     activatedPlatforms.add(i);
   }
 
@@ -1001,25 +1097,14 @@ function animate() {
 
     const railOnly = eventUsesSustainedRail[hit.index];
     const hasBouncePad = isBounce && !railOnly;
-    const fast = isFastNote(eventTimes, hit.index);
 
     if (hasBouncePad) {
       const impactPos = P(hit.time).clone();
       impactPos.z = 0.4;
       clampBallPositionToWall(impactPos, params.main.ballRadius);
 
-      if (fast) {
-        // Cascade: two bursts spread slightly around impact — no platform, no dip
-        triggerBurst(particles, impactPos, color, currentT);
-        const off = impactPos.clone();
-        off.x += (Math.random() - 0.5) * 0.8;
-        off.y += (Math.random() - 0.5) * 0.8;
-        triggerBurst(particles, off, color, currentT);
-      } else {
-        triggerBurst(particles, impactPos, color, currentT);
-        animatePlatformHit(platformPool, hit.index, currentT, lastSecondsPerBeat);
-      }
-
+      triggerBurst(particles, impactPos, color, currentT);
+      animatePlatformHit(platformPool, hit.index, currentT, lastSecondsPerBeat);
       if (params.fx.rippleEnabled) triggerRipple(ripplePool, impactPos, color, currentT);
 
       triggerSquash(primarySquash, currentT);
@@ -1036,10 +1121,20 @@ function animate() {
     const sbHits = pollEvents(b.eventTimes, sb.firedEvents, currentT, params.main.pollWindow);
     for (const hit of sbHits) {
       const pitch = b.landingPitches[hit.index] ?? 60;
+      const color = pitchToBurstColor(pitch);
       const isBounce = b.landingTypes[hit.index] === 'BOUNCE';
       const railOnly = b.eventUsesSustainedRail[hit.index];
       const hasBouncePad = isBounce && !railOnly;
       if (hasBouncePad) {
+        const impactPos = evalTrajectory(b, hit.time).pos.clone();
+        impactPos.z = 0.4;
+        clampBallPositionToWall(impactPos, params.main.ballRadius);
+
+        triggerBurst(sb.particles, impactPos, color, currentT);
+        animatePlatformHit(sb.platformPool, hit.index, currentT, lastSecondsPerBeat);
+        if (params.fx.rippleEnabled) triggerRipple(sb.ripplePool, impactPos, color, currentT);
+
+        triggerSquash(sb.squash, currentT);
         const padHex = pitchToPlatformColor(pitch);
         setBallPitchTint(sb.ball, padHex);
         sb.trail.tint.setHex(padHex);
